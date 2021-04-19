@@ -8,6 +8,8 @@ read.fcsv<-function( x, skip=3 ) {
   return( df )
   }
 
+source("https://raw.githubusercontent.com/muratmaga/SlicerMorph_Rexamples/main/write.markups.fcsv.R")
+
 library( ANTsRNet )
 library( ANTsR )
 library( patchMatchR )
@@ -62,7 +64,7 @@ fixparams = getAntsrTransformFixedParameters( myaff )
 templateCoM = getCenterOfMass( reoTemplate )
 
 whichk = sample( 1:length(fnsNew), 1 )
-whichk = 6
+#whichk = 6
 print( whichk )
 oimg = antsImageRead( fnsNew[whichk] ) %>% resampleImage( locdim, useVoxels=TRUE)
 img = antsImageClone( oimg )
@@ -123,7 +125,11 @@ ptsOriginalSpace = getCentroids( ptimg2 )[,1:img@dimension]
 trad = sqrt( sum( antsGetSpacing( oimg )^2 ) )
 ptsi = makePointsImage( ptsOriginalSpace, oimg*0+1, radius = trad ) %>% iMath( "GD", 1 )
 # plot( oimg, ptsi, nslices = 21, ncolumns = 7, axis=1 )
-write.csv( ptsOriginalSpace, 'temp.csv', row.names=F )
+
+#write.csv( ptsOriginalSpace, 'temp.csv', row.names=F )
+write.markups.fcsv(pts=ptsOriginalSpace,
+                   file = paste0(fnsNew[whichk], '.fcsv') 
+
 # NOTE: it may be better to apply this mapping to the coordinate space heat
 # maps output from the unet, backtransform them to the original space, and
 # then estimate the points.
