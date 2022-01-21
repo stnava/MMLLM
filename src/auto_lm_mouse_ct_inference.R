@@ -1,12 +1,15 @@
 Sys.setenv("TF_NUM_INTEROP_THREADS"=12)
 Sys.setenv("TF_NUM_INTRAOP_THREADS"=12)
 Sys.setenv("ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS"=12)
+Sys.setenv(CUDA_VISIBLE_DEVICES=2)
+mygpu=Sys.getenv("CUDA_VISIBLE_DEVICES")
 
 read.fcsv<-function( x, skip=3 ) {
   df = read.table( x, skip=skip, sep=',' )
   colnames( df ) = c("id","x","y","z","ow","ox","oy","oz","vis","sel","lock","label","desc","associatedNodeID")
   return( df )
   }
+setwd("~/Desktop/MMLLM/")
 
 source("https://raw.githubusercontent.com/muratmaga/SlicerMorph_Rexamples/main/write.markups.fcsv.R")
 
@@ -25,7 +28,7 @@ reoTemplate = antsImageRead( "templateImage.nii.gz" ) # antsImageClone( imgListT
 ptTemplate = data.matrix( read.csv( "templatePoints.csv" ) )# ptListTest[[templatenum]]
 locdim = dim(reoTemplate)
 
-fnsNew = Sys.glob("data_landmark_new_04_13_2021/*_.nii.gz")
+fnsNew = Sys.glob("data_landmark_new_04_13_2021/*.nii.gz")
 
 
 # this is inference code
@@ -57,7 +60,9 @@ unet = createUnetModel3D(
      )
 unet = keras_model( unet$inputs, tf$nn$sigmoid( unet$outputs[[1]] ) )
 findpoints = deepLandmarkRegressionWithHeatmaps( unet, activation='relu', theta=NA )
-load_model_weights_hdf5( findpoints,   "models/autopointsfocused_sigmoid_128_weights_3d_checkpoints5_GPU2.h5" )
+#load_model_weights_hdf5( findpoints,   "models/autopointsfocused_sigmoid_128_weights_3d_checkpoints5_GPU2.h5" )
+load_model_weights_hdf5( findpoints,   "models/autopointsupdate_sigmoid_128_weights_3d_checkpoints5_GPU2_recent.h5" )
+
 myaff = randomAffineImage( reoTemplate, "Rigid", sdAffine = 0 )[[2]]
 idparams = getAntsrTransformParameters( myaff )
 fixparams = getAntsrTransformFixedParameters( myaff )
@@ -128,7 +133,7 @@ ptsi = makePointsImage( ptsOriginalSpace, oimg*0+1, radius = trad ) %>% iMath( "
 
 #write.csv( ptsOriginalSpace, 'temp.csv', row.names=F )
 write.markups.fcsv(pts=ptsOriginalSpace,
-                   file = paste0(fnsNew[whichk], '.fcsv') 
+                   file = paste0(fnsNew[whichk], '_Inference.fcsv')) 
 
 # NOTE: it may be better to apply this mapping to the coordinate space heat
 # maps output from the unet, backtransform them to the original space, and
@@ -137,7 +142,8 @@ write.markups.fcsv(pts=ptsOriginalSpace,
 # pointsoutte[[1]]
 #
 # compare to tru points
-trupts = read.fcsv( paste0( fnsNew[whichk], ".fcsv" ) )
+#trupts = read.fcsv( paste0( fnsNew[whichk], ".fcsv" ) )
+trupts = read.fcsv("data_landmark_new_04_13_2021/152_9.fcsv")
 trupts = data.matrix( trupts[,c("x","y","z")] )
 distancesByPoint = rep( NA, nrow( trupts ) )
 for ( k in 1:nrow( trupts ) ) {

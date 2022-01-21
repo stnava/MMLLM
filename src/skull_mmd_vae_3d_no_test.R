@@ -1,6 +1,6 @@
-Sys.setenv("TF_NUM_INTEROP_THREADS"=12)
-Sys.setenv("TF_NUM_INTRAOP_THREADS"=12)
-Sys.setenv("ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS"=12)
+Sys.setenv("TF_NUM_INTEROP_THREADS"=24)
+Sys.setenv("TF_NUM_INTRAOP_THREADS"=24)
+Sys.setenv("ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS"=24)
 library( ANTsRNet )
 library( ANTsR )
 library( patchMatchR )
@@ -48,6 +48,9 @@ library( ANTsR )
 library( patchMatchR )
 library( tensorflow )
 library( keras )
+
+setwd("~/Desktop/MMLLM/")
+
 set.seed( 2 )
 fns = Sys.glob("data/*[0-9].nii.gz")
 myids = basename( fns ) %>% tools::file_path_sans_ext(T)
@@ -56,13 +59,13 @@ demog = data.frame( ids = myids,
   fnseg=gsub( ".nii.gz","-LM.nii.gz", as.character(fns) ) )
 demog$isTrain = TRUE
 # now add in the new data
-fnsNew = Sys.glob("data_landmark_new_04_13_2021/*_.nii.gz")
-myidsNew = basename( fnsNew ) %>% tools::file_path_sans_ext(T)
-demogNew = data.frame( ids = myidsNew,
-  fnimg=as.character(fnsNew),
-  fnseg=paste0(as.character(fnsNew),".fcsv"))
-demogNew$isTrain = rep( TRUE, nrow(demogNew) )
-demog = rbind( demog, demogNew )
+#fnsNew = Sys.glob("data_landmark_new_04_13_2021/*_.nii.gz")
+#myidsNew = basename( fnsNew ) %>% tools::file_path_sans_ext(T)
+#demogNew = data.frame( ids = myidsNew,
+#  fnimg=as.character(fnsNew),
+#  fnseg=paste0(as.character(fnsNew),".fcsv"))
+#demogNew$isTrain = rep( TRUE, nrow(demogNew) )
+#demog = rbind( demog, demogNew )
 
 reoTemplate = antsImageRead( "templateImage.nii.gz" ) # antsImageClone( imgListTest[[templatenum]] )
 ptTemplate = data.matrix( read.csv( "templatePoints.csv" ) )# ptListTest[[templatenum]]
@@ -107,6 +110,7 @@ if ( ! exists( "imgList" ) ) {
 
 nChannelsIn = 1
 nChannelsOut = nrow( ptList[[1]] )
+Sys.setenv(CUDA_VISIBLE_DEVICES=2)
 mygpu=Sys.getenv("CUDA_VISIBLE_DEVICES")
 opre = paste0("models/autopointsupdate_sigmoid_128_weights_3d_checkpoints5_GPU",mygpu)
 mdlfn = paste0(opre,'.h5')
@@ -295,7 +299,7 @@ compute_mmd <- function( x, y, sigma=tf$cast( 1e1, mytype ), takeMean = FALSE ) 
 }
 
 # Training loop -----------------------------------------------------------
-num_epochs <- 500000
+num_epochs <- 5000
 generator_batch_size = 1
 local_batch_size = 1
 lossper = data.frame( loss=NA, pt=NA, rot=NA, mmd=NA, mmdwt=NA, SD=NA, testErr=NA,
@@ -305,7 +309,8 @@ if ( file.exists( lossperfn ) ) {
   lossper = read.csv( lossperfn )
   epoch = nrow( lossper ) + 1
   }
-optimizerE <- tf$keras$optimizers$Adam(1e-4)
+#optimizerE <- tf$keras$optimizers$Adam(1e-4)
+optimizerE <- tf$keras$optimizers$Adam(1e-33) #for small voxel size.
 mmdWeight = tf$cast( 10.0, mytype)
 ptWeight = tf$cast( 4e-3, mytype )
 rtWeight = tf$cast( 0.1, mytype )
@@ -319,7 +324,7 @@ refpoints = tf$stack( refptlist )
 layout(matrix(1:2,nrow=1,byrow=F))
 ##################################
 for (epoch in epoch:num_epochs ) {
-  locsd = 0.25 #  epoch / 2000  * 1.5
+  locsd = 0.25 #  epoch / 2000  * 1.5a
   with(tf$device("/cpu:0"), {
     gg = generateData( batch_size = generator_batch_size,  mySdAff=locsd, verbose=FALSE  )
     datalist = list(
