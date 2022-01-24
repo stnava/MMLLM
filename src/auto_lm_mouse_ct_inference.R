@@ -8,8 +8,6 @@ read.fcsv<-function( x, skip=3 ) {
   return( df )
   }
 
-source("https://raw.githubusercontent.com/muratmaga/SlicerMorph_Rexamples/main/write.markups.fcsv.R")
-
 library( ANTsRNet )
 library( ANTsR )
 library( patchMatchR )
@@ -57,21 +55,32 @@ unet = createUnetModel3D(
      )
 unet = keras_model( unet$inputs, tf$nn$sigmoid( unet$outputs[[1]] ) )
 findpoints = deepLandmarkRegressionWithHeatmaps( unet, activation='relu', theta=NA )
-load_model_weights_hdf5( findpoints,   "models/autopointsfocused_sigmoid_128_weights_3d_checkpoints5_GPU2.h5" )
+load_model_weights_hdf5( findpoints,   "models/autopointsupdate_sigmoid_128_weights_3d_checkpoints5_GPU1.h5")
+# load_model_weights_hdf5( findpoints, "models/autopointsupdate_sigmoid_128_weights_3d_checkpoints5_GPU1_recent.h5")
 myaff = randomAffineImage( reoTemplate, "Rigid", sdAffine = 0 )[[2]]
 idparams = getAntsrTransformParameters( myaff )
 fixparams = getAntsrTransformFixedParameters( myaff )
 templateCoM = getCenterOfMass( reoTemplate )
 
-whichk = sample( 1:length(fnsNew), 1 )
-#whichk = 6
-print( whichk )
-oimg = antsImageRead( fnsNew[whichk] ) %>% resampleImage( locdim, useVoxels=TRUE)
+kk = sample( 1:length(fnsNew), 1 )
+print( kk )
+oimg0 = antsImageRead( fnsNew[kk] ) %>% resampleImage( locdim, useVoxels=TRUE)
+kk = sample( 1:length(fnsNew), 1 )
+fnsNew2 = Sys.glob( "/Users/stnava/data/murat/muratMMLLM/MMLLM/data/*[0-9].nii.gz" )
+fnsNew2LM = Sys.glob( "/Users/stnava/data/murat/muratMMLLM/MMLLM/data/*[0-9]*LM.nii.gz" )
+kk = 4# sample( 1:length(fnsNew2), 1 )
+print( kk )
+print( fnsNew2[kk] )
+lmfn = fnsNew2LM[kk]
+oimg0 = antsImageRead( fnsNew2[kk] )
+oimg = antsImageRead( fnsNew2[kk] ) %>% resampleImage( locdim, useVoxels=TRUE)
+reoTemplate=iMath(reoTemplate,"TruncateIntensity",0.000001,0.99)
+# oimg=iMath(oimg,"TruncateIntensity",0.01,0.9)
+oimg = histogramMatchImage( oimg, reoTemplate )
 img = antsImageClone( oimg )
 invisible( antsCopyImageInfo2( img, reoTemplate ) )
 imgCoM = getCenterOfMass( iMath(img, "Normalize") )
 imgarr = array( as.array( iMath(img, "Normalize") ), dim=c(1,locdim,1) )
-print("deep rigid")
 with(tf$device("/cpu:0"), {
       predRot <- predict( orinet, tf$cast( imgarr, mytype), batch_size = 1 )
     })
@@ -84,14 +93,10 @@ locparams[10:length(locparams)] = (imgCoM - templateCoM )
 setAntsrTransformParameters( myaff, locparams )
 setAntsrTransformFixedParameters( myaff, templateCoM )
 rotated = applyAntsrTransformToImage( myaff, img, reoTemplate )
-print("classical rigid")
-qreg = antsRegistration( reoTemplate, img, "Rigid", initialTransform=myaff )
-print("classical sim")
-qreg = antsRegistration( reoTemplate, img, "Similarity", initialTransform=qreg$fwdtransforms )
-print("classical aff")
-qreg = antsRegistration( reoTemplate, img, "Affine", initialTransform=qreg$fwdtransforms )
-img2LM = qreg$warpedmovout
+qreg = antsRegistration( reoTemplate, img, "SyN", initialTransform=myaff )
+img2LM = histogramMatchImage( qreg$warpedmovout, reoTemplate )
 print( antsImageMutualInformation( reoTemplate, img2LM) )
+plot(   reoTemplate, img2LM, nslices = 21, ncolumns = 7  )
 
 img2LMcoords = coordinateImages( img2LM * 0 + 1 )
 mycc = array( dim = c( 1, dim( img2LM ), 3 ) )
@@ -104,15 +109,10 @@ with(tf$device("/cpu:0"), {
 ptp = as.array(pointsoutte[[2]])[1,,]
 ptimg = makePointsImage( ptp, img2LM*0+1, radius=1 )  %>% iMath("GD",3)
 print(sort(unique(ptimg)))
-# plot( img2LM, ptimg, nslices = 21, ncolumns = 7 )
-ptmask = thresholdImage( ptimg, 1, 2 )
-ptmaskdil = iMath( ptmask, "MD", 8 )
-#plot(
-#  cropImage(img2LM,ptmaskdil),
-#  cropImage(ptimg*thresholdImage(ptimg,1,2),ptmaskdil), nslices = 21, ncolumns = 7 )
+plot( img2LM, ptimg, nslices = 21, ncolumns = 7 )
 # now we transform points to original (rotational) space
-ptpb = antsApplyTransformsToPoints( 3, ptp, qreg$fwdtransforms, whichtoinvert=c(FALSE) )
-ptimg2 = makePointsImage( ptpb, img*0+1, radius=1 ) %>% iMath("GD",4)
+ptpb = antsApplyTransformsToPoints( 3, ptp, qreg$fwdtransforms )
+ptimg = makePointsImage( ptpb, img*0+1, radius=1 ) %>% iMath("GD",4)
 # plot( img, ptimg, nslices = 21, ncolumns = 7, axis=1 )
 # but the original image is in yet another space.
 # there is a purely mathematical conversion that could be applied just based
@@ -120,16 +120,15 @@ ptimg2 = makePointsImage( ptpb, img*0+1, radius=1 ) %>% iMath("GD",4)
 # why we convert to image space then back to point space.   note, however,
 # that - for morphometry - rotations do not matter.  and global scale is just
 # based on the spacing.
-invisible( antsCopyImageInfo2( ptimg2, oimg ) )
-ptsOriginalSpace = getCentroids( ptimg2 )[,1:img@dimension]
+invisible( antsCopyImageInfo2( ptimg, oimg ) )
+ptsOriginalSpace = getCentroids( ptimg )[,1:img@dimension]
 trad = sqrt( sum( antsGetSpacing( oimg )^2 ) )
-ptsi = makePointsImage( ptsOriginalSpace, oimg*0+1, radius = trad ) %>% iMath( "GD", 1 )
-# plot( oimg, ptsi, nslices = 21, ncolumns = 7, axis=1 )
-
-#write.csv( ptsOriginalSpace, 'temp.csv', row.names=F )
-write.markups.fcsv(pts=ptsOriginalSpace,
-                   file = paste0(fnsNew[whichk], '.fcsv') 
-
+ptsi = makePointsImage( ptsOriginalSpace, oimg*0+1, radius = trad ) %>% iMath("GD",1)
+plot( oimg, ptsi, nslices = 21, ncolumns = 7, axis=1 )
+ptsir = resampleImageToTarget( ptsi, oimg0, interpType='nearestNeighbor')
+plot( oimg0, ptsir, nslices = 21, ncolumns = 7, axis=1 )
+antsImageWrite( ptsir, '/tmp/temp.nii.gz' )
+write.csv( ptsOriginalSpace, 'temp.csv', row.names=F )
 # NOTE: it may be better to apply this mapping to the coordinate space heat
 # maps output from the unet, backtransform them to the original space, and
 # then estimate the points.
@@ -137,8 +136,11 @@ write.markups.fcsv(pts=ptsOriginalSpace,
 # pointsoutte[[1]]
 #
 # compare to tru points
-trupts = read.fcsv( paste0( fnsNew[whichk], ".fcsv" ) )
-trupts = data.matrix( trupts[,c("x","y","z")] )
+# trupts = read.fcsv( paste0( fnsNew[k], ".fcsv" ) )
+# trupts = data.matrix( trupts[,c("x","y","z")] )
+lm2template = antsImageRead( lmfn )
+# lm2template = antsApplyTransforms( reoTemplate, lm2template, )
+trupts = getCentroids( lm2template )
 distancesByPoint = rep( NA, nrow( trupts ) )
 for ( k in 1:nrow( trupts ) ) {
   distancesByPoint[k] = sqrt( sum( ( trupts[k,] - ptsOriginalSpace[k,] )^2 ) )
@@ -147,28 +149,6 @@ print( distancesByPoint )
 
 print( mean( distancesByPoint ) )
 
-worstinds = head( rev(order(distancesByPoint)), 6 )
-print( " bad ones " )
-print( worstinds )
-print( distancesByPoint[ worstinds ] )
-
-layout( matrix(1:2,nrow=2))
-# these are the tru points
-ptsitru = makePointsImage( trupts, oimg*0+1, radius = trad ) %>% iMath( "GD", 1 )
-binmask = maskImage( ptsitru, ptsitru, level = worstinds, binarize= TRUE  )
-binmaskdil = iMath(binmask, "MD", 6 )
-ptsitrumsk = maskImage( ptsitru, ptsitru, level = worstinds, binarize=FALSE )
-plot(
-  cropImage(oimg,binmaskdil),
-  cropImage(ptsitrumsk,binmaskdil), nslices = 28, ncolumns = 14, axis=1 )
-
-#
-# these are the est points
-ptsiest = makePointsImage( ptsOriginalSpace, oimg*0+1, radius = trad ) %>% iMath( "GD", 1 )
-ptsiestmsk = maskImage( ptsiest, ptsiest, level = worstinds, binarize=FALSE )
-plot(
-  cropImage(oimg,binmaskdil),
-  cropImage(ptsiestmsk,binmaskdil), nslices = 28, ncolumns = 14, axis=1 )
 
 
 if ( FALSE ) {
@@ -182,8 +162,3 @@ if ( FALSE ) {
   sort(unique(ptimg))
   plot( img2LM, ptimg, nslices = 21, ncolumns = 7 )
 }
-
-
-# 51 52 29  1  2 53
-# 51 29 52  1  2 53
-# 51 29 52  1 53  2
