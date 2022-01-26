@@ -20,7 +20,6 @@ mytype = "float32"
 # +       iMath("Normalize")
 # +     img = smoothImage( img, 1.5, sigmaInPhysicalCoordinates = FALSE ) %>%
 # +       iMath("Normalize")
-# +     msk = thresholdImage( img, 0.1, 99 )
 
 
 ####################################################################################
@@ -76,9 +75,17 @@ if ( ! exists( "imgList" ) ) {
   for ( k in mynums ) {
     segisimg = length( grep("csv", demog$fnseg[k] ) ) == 0
     if ( segisimg ) {
+      # this is what we try next
+      # img = antsImageRead( demog$fnimg[k] ) %>%
+      #  denoiseImage( noiseModel="Gaussian") %>%
+      #  iMath("TruncateIntensity",lowerTrunc,upperTrunc) %>% iMath("Normalize")
+
+      # trained like this
       img = antsImageRead( demog$fnimg[k] ) %>%
-        denoiseImage( noiseModel="Gaussian") %>%
-        iMath("TruncateIntensity",lowerTrunc,upperTrunc) %>% iMath("Normalize")
+        iMath("TruncateIntensity",0.01,0.99) %>%
+          iMath("Normalize")
+      img = smoothImage( img, 1.5, sigmaInPhysicalCoordinates = FALSE ) %>%
+         iMath("Normalize")
       seg = antsImageRead( demog$fnseg[k] )
       pts = getCentroids( seg )[,1:img@dimension]
     }
@@ -101,10 +108,18 @@ if ( ! exists( "imgListTest" ) ) {
   mynums = which( !demog$isTrain )
   ct = 1
   for ( k in mynums ) {
+    # this is what we try next
+    # img = antsImageRead( demog$fnimg[k] ) %>%
+    #  denoiseImage( noiseModel="Gaussian") %>%
+    #  iMath("TruncateIntensity",lowerTrunc,upperTrunc) %>% iMath("Normalize")
+
+    # trained like this
     img = antsImageRead( demog$fnimg[k] ) %>%
-      denoiseImage( noiseModel="Gaussian") %>%
-      iMath("TruncateIntensity",lowerTrunc,upperTrunc) %>% iMath("Normalize")
-    msk = thresholdImage( img, 0.1, 99 )
+      iMath("TruncateIntensity",0.01,0.99) %>%
+        iMath("Normalize")
+    img = smoothImage( img, 1.5, sigmaInPhysicalCoordinates = FALSE ) %>%
+       iMath("Normalize")
+
     seg = antsImageRead( demog$fnseg[k] )
     pts = getCentroids( seg )[,1:img@dimension]
     if ( nrow( pts ) == 55  & min(rowSums(abs(pts))) > 0) {
