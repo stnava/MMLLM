@@ -15,11 +15,13 @@ library( pracma ) # just for cross function ie vector cross product
 mytype = "float32"
 
 
-read.fcsv<-function( x, skip=3 ) {
-  df = read.table( x, skip=skip, sep=',' )
-  colnames( df ) = c("id","x","y","z","ow","ox","oy","oz","vis","sel","lock","label","desc","associatedNodeID")
-  return( df )
-  }
+# +     img = antsImageRead( demog$fnimg[k] ) %>%
+# +       iMath("TruncateIntensity",0.01,0.99) %>%
+# +       iMath("Normalize")
+# +     img = smoothImage( img, 1.5, sigmaInPhysicalCoordinates = FALSE ) %>%
+# +       iMath("Normalize")
+# +     msk = thresholdImage( img, 0.1, 99 )
+
 
 ####################################################################################
 ################ SEE: Representation learning with MMD-VAE
@@ -43,43 +45,26 @@ negateI <- function( x ) {
   max( x ) - x
 }
 
-prepro <- function( img, padder = 0 ) {
-  # we  need to adjust the scale-space search for physical units, as below.
-  img = (
-    iMath(img, "Normalize") %>% iMath("PadImage",padder) ) * 255
-  npt = c(1024,12) # ad-hoc choices here and in the next few lines - needs evaluation
-  steppe = 4
-  ss = scaleSpaceFeatureDetection( img, npt[1],
-    stepsPerOctave=steppe,
-    minScale = min( antsGetSpacing(img) )*0.1, # these select the physical space scale of features - smallest
-    maxScale = min( antsGetSpacing(img) )*64,  # to largest
-    negate = FALSE )$blobImage
-  mask = thresholdImage( ss, 1e-9, Inf ) +
-    randomMask( thresholdImage(img, 25, 255 ), npt[2] )
-
-  print(paste("Extracted:",sum(mask==1),"mask points"))
-
-  return( list( img =  img, ss = ss, mask = mask ) )
-}
-
 set.seed( 2 )
-fns = Sys.glob("MMLLM/data/*[0-9].nii.gz")
+fns = Sys.glob("bigdata/*rec.nii.gz")
 myids = basename( fns ) %>% tools::file_path_sans_ext(T)
 demog = data.frame( ids = myids,
   fnimg=as.character(fns),
   fnseg=gsub( ".nii.gz","-LM.nii.gz", as.character(fns) ) )
-istrain=sample(1:nrow(demog), round( 0.95 * nrow( demog ) ) )
+demog = demog[ sample(1:nrow(demog),8),]
 demog$isTrain = TRUE
-demog$isTrain[ nrow( demog )] = FALSE
+demog$isTrain[ sample(1:nrow( demog ),2) ] = FALSE
 
 
 # define an image template that lets us penalize rotations away from this reference
 # templatenum=10
-reoTemplate = antsImageRead( "templateImage.nii.gz" )
-newspc = 2.0 * antsGetSpacing( reoTemplate )
+reoTemplate = antsImageRead( "templateImage.nii.gz" ) %>% iMath("Normalize")
+newspc = 4.0 * antsGetSpacing( reoTemplate )
 reoTemplate = resampleImage( reoTemplate, newspc ) %>% iMath( "PadImage", 32 )
 ptTemplate = data.matrix( read.csv( "templatePoints.csv" ) )# ptListTest[[templatenum]]
 locdim = dim(reoTemplate)
+lowerTrunc=1e-6
+upperTrunc=0.95
 
 
 numToTest = sum( demog$isTrain )
@@ -91,28 +76,19 @@ if ( ! exists( "imgList" ) ) {
   for ( k in mynums ) {
     segisimg = length( grep("csv", demog$fnseg[k] ) ) == 0
     if ( segisimg ) {
-      img = antsImageRead( demog$fnimg[k] ) %>% resampleImage( newspc ) %>%
-        iMath( "PadImage", 32 ) %>% histogramMatchImage( reoTemplate )
+      img = antsImageRead( demog$fnimg[k] ) %>%
+        denoiseImage( noiseModel="Gaussian") %>%
+        iMath("TruncateIntensity",lowerTrunc,upperTrunc) %>% iMath("Normalize")
       seg = antsImageRead( demog$fnseg[k] )
       pts = getCentroids( seg )[,1:img@dimension]
-    } else {
-      # the original model was trained on data with "bad" spacing
-      # so we unfortunately propagate that here
-      # not so bad b/c all we need is landmarks in the end which can be
-      # expressed in whatever space the original image has.
-      # the point is that we are throwing away image information in order to
-      # express the points/images in voxel space - purposely to improve learning.
-      img = antsImageRead( demog$fnimg[k] ) %>% resampleImage( locdim, useVoxels=TRUE)
-      pts0 = data.matrix( read.fcsv( demog$fnseg[k] )[,2:4] )
-      trad = sqrt( sum( antsGetSpacing( img )^2 ) )
-      ptsi = makePointsImage( pts0, img*0+1, radius = trad ) %>% iMath("GD",1)
-      invisible( antsCopyImageInfo2( img, reoTemplate ) )
-      invisible( antsCopyImageInfo2( ptsi, reoTemplate ) )
-      pts = getCentroids( ptsi )[,1:img@dimension]
     }
     if ( nrow( pts ) == 55 & min(rowSums(abs(pts))) > 0 ) {
-      imgList[[ct]] = img
-      ptList[[ct]] = pts
+      fittx = fitTransformToPairedPoints( pts, ptTemplate, "Rigid" )
+      rimg = applyAntsrTransformToImage( fittx$transform, img, reoTemplate  )
+      loctxi = invertAntsrTransform( fittx$transform )
+      blobs = applyAntsrTransformToPoint( loctxi, pts )
+      imgList[[ct]] = rimg
+      ptList[[ct]] = blobs
       cat(paste0(ct,"..."))
       ct = ct + 1
       }
@@ -125,24 +101,25 @@ if ( ! exists( "imgListTest" ) ) {
   mynums = which( !demog$isTrain )
   ct = 1
   for ( k in mynums ) {
-    img = antsImageRead( demog$fnimg[k] ) %>% resampleImage( newspc ) %>%
-      iMath( "PadImage", 32 ) %>% histogramMatchImage( reoTemplate )
+    img = antsImageRead( demog$fnimg[k] ) %>%
+      denoiseImage( noiseModel="Gaussian") %>%
+      iMath("TruncateIntensity",lowerTrunc,upperTrunc) %>% iMath("Normalize")
+    msk = thresholdImage( img, 0.1, 99 )
     seg = antsImageRead( demog$fnseg[k] )
     pts = getCentroids( seg )[,1:img@dimension]
     if ( nrow( pts ) == 55  & min(rowSums(abs(pts))) > 0) {
-      imgListTest[[ct]] = img
-      ptListTest[[ct]] = pts
+      fittx = fitTransformToPairedPoints( pts, ptTemplate, "Rigid" )
+      rimg = applyAntsrTransformToImage( fittx$transform, img, reoTemplate  )
+      loctxi = invertAntsrTransform( fittx$transform )
+      blobs = applyAntsrTransformToPoint( loctxi, pts )
+      imgListTest[[ct]] = rimg
+      ptListTest[[ct]] = blobs
       cat(paste0(ct,"..."))
       ct = ct + 1
       }
     }
   }
 
-mygpu=Sys.getenv("CUDA_VISIBLE_DEVICES")
-opre = paste0("models/mouse_rotation_3D_GPU_update",mygpu)
-mdlfn = paste0(opre,'.h5')
-mdlfnr = paste0(opre,'_recent.h5')
-lossperfn = paste0(opre,'_training_history.csv')
 
 
 ###############################
@@ -154,6 +131,7 @@ generateData <- function( batch_size = 32, mySdAff=0.15, isTest=FALSE, verbose=F
     imgListLocal = imgList
     ptListLocal = ptList
   }
+  locdim = dim( reoTemplate )
   X = array( dim = c( batch_size, locdim, 1 ) )
   Y = array( dim = c( batch_size, 6 ) )
   matlist = list()
@@ -196,7 +174,6 @@ generateData <- function( batch_size = 32, mySdAff=0.15, isTest=FALSE, verbose=F
   ) ) # input
 }
 
-gg = generateData( batch_size = 3,  mySdAff=1.5  )
 ########################
 # Parameters --------------------------------------------------------------
 K <- keras::backend()
@@ -233,8 +210,9 @@ SO3_6_param_loss <- function( x, xpred ) {
 }
 
 
-testingError <- function( returnMean=TRUE ) {
+testingError <- function( mySdAff ) {
   with(tf$device("/cpu:0"), {
+    ggte = generateData( batch_size=8, mySdAff = mySdAff, isTest=TRUE  )
     predRot <- predict( orinet, tf$cast( ggte[[1]], mytype), batch_size = 4 )
   })
   # assess the matrix distances
@@ -245,86 +223,125 @@ testingError <- function( returnMean=TRUE ) {
     mm = polarDecomposition( mmm )$Z
     matdist[k] = norm(  diag(3) - mm %*% t( ggte[[3]][[k]] ) , "F" )
     }
-  if ( returnMean ) return( mean( matdist ) )
-  return( matdist )
+  return( mean( matdist ) )
   }
 
 
-# Model -------------------------------------------------------------------
-orinet =  createResNetModel3D(
+#
+
+
+#
+orinetOld =  createResNetModel3D(
        list(NULL,NULL,NULL,1),
        inputScalarsSize = 0,
        numberOfClassificationLabels = 6,
-       layers = 1:4,
-       residualBlockSchedule = c(3, 4, 6, 3),
-       lowestResolution = 16,
-       cardinality = 1,
+#       layers = 1:4,
+#       residualBlockSchedule = c(3, 4, 6, 3),
+       lowestResolution = 8,
+       cardinality = 2,
        squeezeAndExcite = TRUE,
        mode = "regression")
 
-if ( file.exists( mdlfn ) )
-  load_model_weights_hdf5( orinet,  mdlfn )
-if ( file.exists( mdlfnr ) )
-  load_model_weights_hdf5( orinet,  mdlfnr )
 
-# testing data inference
-ggte = generateData( batch_size=8, mySdAff = 2, isTest=TRUE  )
-
-
-# Training loop -----------------------------------------------------------
-optimizerE <- tf$keras$optimizers$Adam(1e-4)
-num_epochs <- 500000
-lossper = data.frame( loss=NA, rotval=NA, mseval=NA, SD=NA, testErr=NA,
-  runningmean=NA )
-epoch=1
-if ( file.exists( lossperfn ) ) {
-  lossper = read.csv( lossperfn )
-  epoch = nrow( lossper ) + 1
-  }
-for (epoch in epoch:num_epochs ) {
-  locsd = epoch / 2000  * 1.5 + 0.5
-  if ( epoch > 25 ) locsd = 2
-  if ( epoch > 250 ) locsd = 5
-  batchSize = 16
-  gg = generateData( batch_size = batchSize,  mySdAff=locsd, verbose=FALSE  )
-  datalist = list(
-    tf$cast(gg[[1]],mytype), # images
-    tf$cast(gg[[2]],mytype)
-  )
-  with(tf$GradientTape(persistent = FALSE) %as% tape, {
-      rotp <- orinet( datalist[[1]] )
-      mseval = tf$reduce_mean( tf$losses$MSE(  datalist[[2]], rotp  ) )
-      xR = tfRotVectorToMatrix( datalist[[2]] )
-      xpredR = tfRotVectorToMatrix( rotp )
-      idMat = tf$linalg$matmul(  xR, xR, transpose_b=TRUE )
-      deltaMat2 = tf$linalg$matmul(  xR, xpredR, transpose_b=TRUE )
-      so3diff2 = idMat - deltaMat2
-      frobnormexp2 = tf$reduce_sum( tf$multiply(so3diff2, so3diff2), axis=list(1L,2L) )
-      rotval = tf$reduce_mean( frobnormexp2 )
-      loss = rotval + mseval * tf$constant(2.0)
-    })
-  rot_gradients <- tape$gradient(loss, orinet$trainable_variables)
-  optimizerE$apply_gradients(purrr::transpose(list(
-      rot_gradients, orinet$trainable_variables )))
-#  tracker = orinet %>% fit( datalist[[1]], datalist[[2]], epochs = 1, verbose=1 )
-  lossper[epoch,'loss']= as.numeric(loss) # tracker$metrics$loss[1]
-  lossper[epoch,'rotval']= as.numeric(rotval) # tracker$metrics$loss[1]
-  lossper[epoch,'mseval']= as.numeric(mseval) # tracker$metrics$loss[1]
-  lossper[epoch,'SD']=locsd
-  loepoch = (epoch-100)
-  if ( loepoch < 1 ) loepoch = 1
-  lossper[epoch,'runningmean']=mean(lossper[loepoch:(epoch-1),'loss'])
-  if ( lossper[epoch,'runningmean'] < min( lossper[loepoch:(epoch-1),'runningmean'], na.rm=T  ) ) {
-    print("best-recent")
-    save_model_weights_hdf5( orinet, mdlfnr )
+filters=32
+inputLayer <- layer_input( list(NULL,NULL,NULL,1) )
+conv3d_block <- function( input, filters,
+      strides = 1, leakParameter = 0.2 ) {
+      d = layer_conv_3d( input, filters, kernel_size=9,
+        strides = strides, padding='same' )
+      d <- layer_batch_normalization( d )
+      d <- layer_activation_leaky_relu( d, leakParameter )
+      d
     }
-  write.csv( lossper, lossperfn, row.names=FALSE )
-  if ( epoch %% 5 == 1  ) {
-    lossper[epoch,'testErr']=as.numeric( testingError(  ) )
-    if ( lossper[epoch,'testErr'] < min( lossper[1:(epoch-1),'testErr'], na.rm=T ) ) {
-      print("best")
-      save_model_weights_hdf5( orinet, mdlfn )
+x = conv3d_block( inputLayer, filters )
+x = layer_max_pooling_3d( x )
+x = conv3d_block( x, filters)
+x <- layer_batch_normalization( x )
+x = layer_max_pooling_3d( x )
+x = conv3d_block( x, filters )
+x <- layer_batch_normalization( x )
+x = layer_global_average_pooling_3d(x)
+x = layer_dense(x, 6, activation='linear')
+orinet = keras_model(inputs=inputLayer, outputs=x)
+
+orinet = createResNetModel3D(
+      list(NULL,NULL,NULL,1),
+      inputScalarsSize = 0,
+      numberOfClassificationLabels = 6,
+      layers = 1:4,
+      residualBlockSchedule = c(3, 4, 6, 3),
+      lowestResolution = 64,
+      cardinality = 1,
+      squeezeAndExcite = TRUE,
+      mode = "regression"
+    )
+
+locsds = c(0.05, 0.1, 0.2, 0.3, 0.4, 0.5,1, 2, 5 )
+num_epochs <- rep( 50, length( locsds ) )
+for ( locsdct in length(locsds):length(locsds) ) {
+  locsd = locsds[locsdct]
+  if ( locsd >= 0.5 ) num_epochs = 100
+  if ( locsd >= 1.0 ) num_epochs = 40000
+  mygpu=Sys.getenv("CUDA_VISIBLE_DEVICES")
+  opre = paste0("models/mouse_rotation_3D_GPU_update",mygpu,"locsd",locsd)
+  mdlfn = paste0(opre,'.h5')
+  mdlfnr = paste0(opre,'_recent.h5')
+  lossperfn = paste0(opre,'_training_history.csv')
+  if ( file.exists( mdlfn ) )
+    load_model_weights_hdf5( orinet,  mdlfn )
+  # Training loop -----------------------------------------------------------
+  optimizerE <- tf$keras$optimizers$Adam(1e-5)
+  lossper = data.frame( loss=NA, rotval=NA, mseval=NA, SD=NA, testErr=NA,
+    runningmean=NA )
+  epoch=1
+  if ( file.exists( lossperfn ) ) {
+  #  lossper = read.csv( lossperfn )
+  #  epoch = nrow( lossper ) + 1
+    }
+  for (epoch in epoch:num_epochs ) {
+  #  if ( epoch == 525 ) optimizerE <- tf$keras$optimizers$Adam(1e-3)
+    locsd = locsds[locsdct]
+  #  if ( locsd > 0.5 ) locsd = 0.5
+    batchSize = 16
+    gg = generateData( batch_size = batchSize,  mySdAff=locsd, verbose=FALSE  )
+    datalist = list(
+      tf$cast(gg[[1]],mytype), # images
+      tf$cast(gg[[2]],mytype)
+    )
+    with(tf$GradientTape(persistent = FALSE) %as% tape, {
+        rotp <- orinet( datalist[[1]] )
+        mseval = tf$reduce_mean( tf$losses$MSE(  datalist[[2]], rotp  ) )
+        xR = tfRotVectorToMatrix( datalist[[2]] )
+        xpredR = tfRotVectorToMatrix( rotp )
+        idMat = tf$linalg$matmul(  xR, xR, transpose_b=TRUE )
+        deltaMat2 = tf$linalg$matmul(  xR, xpredR, transpose_b=TRUE )
+        so3diff2 = idMat - deltaMat2
+        frobnormexp2 = tf$reduce_sum( tf$multiply(so3diff2, so3diff2), axis=list(1L,2L) )
+        rotval = tf$reduce_mean( frobnormexp2 )
+        loss = rotval +  mseval * tf$constant(20.0)
+      })
+    rot_gradients <- tape$gradient(loss, orinet$trainable_variables)
+    optimizerE$apply_gradients(purrr::transpose(list(
+        rot_gradients, orinet$trainable_variables )))
+    lossper[epoch,'loss']= as.numeric(loss) # tracker$metrics$loss[1]
+    lossper[epoch,'rotval']= as.numeric(rotval) # tracker$metrics$loss[1]
+    lossper[epoch,'mseval']= as.numeric(mseval) # tracker$metrics$loss[1]
+    lossper[epoch,'SD']=locsd
+    loepoch = (epoch-100)
+    if ( loepoch < 1 ) loepoch = 1
+    lossper[epoch,'runningmean']=mean(lossper[loepoch:(epoch-1),'loss'])
+    if ( lossper[epoch,'runningmean'] < min( lossper[loepoch:(epoch-1),'runningmean'], na.rm=T  ) ) {
+      print("best-recent")
+  #    save_model_weights_hdf5( orinet, mdlfnr )
       }
-    }
-  print( tail( lossper, 1 ) )
-}
+    write.csv( lossper, lossperfn, row.names=FALSE )
+    if ( epoch %% 5 == 1  ) {
+      lossper[epoch,'testErr']=as.numeric( testingError( locsd ) )
+      if ( lossper[epoch,'testErr'] < min( lossper[1:(epoch-1),'testErr'], na.rm=T ) ) {
+        print("best")
+        save_model_weights_hdf5( orinet, mdlfn )
+        }
+      }
+    print( tail( lossper, 1 ) )
+  }
+} # locsd loop
