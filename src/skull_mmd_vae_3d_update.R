@@ -21,83 +21,65 @@ library( patchMatchR )
 library( tensorflow )
 library( keras )
 set.seed( 2 )
-fns = Sys.glob("bigdata/*rec.nii.gz")
-myids = basename( fns ) %>% tools::file_path_sans_ext(T)
-demog = data.frame( ids = myids,
-  fnimg=as.character(fns),
-  fnseg=gsub( ".nii.gz","-LM.nii.gz", as.character(fns) ) )
-demog = demog[ sample(1:nrow(demog),32),]
+fns = Sys.glob("preprocessed/*skull.nii.gz")
+myids = basename( fns )
+myids = gsub( "skull.nii.gz", "", myids )
+postfix = c( "reorient.nii.gz", "skulldist.nii.gz", "pts.csv" )
+demog = data.frame(
+  ids = myids,
+  reo = paste0( myids, postfix[1]),
+  dist = paste0( myids, postfix[2]),
+  pts = paste0( myids, postfix[3]) )
+
+demog = demog[ sample(1:nrow(demog),256),]
 demog$isTrain = TRUE
-demog$isTrain[ sample(1:nrow( demog ),8) ] = FALSE
+demog$isTrain[ sample(1:nrow( demog ), 16 ) ] = FALSE
 
 # define an image template that lets us penalize rotations away from this reference
 reoTemplate = antsImageRead( "templateImage.nii.gz" )
-newspc = antsGetSpacing( reoTemplate ) * 1.0
+newspc = antsGetSpacing( reoTemplate ) * 1.22
 reoTemplate = resampleImage( reoTemplate, newspc ) %>%
   iMath("PadImage", 8 )%>%
   iMath("Normalize")
+reoTemplate
 ptTemplate = data.matrix( read.csv( "templatePoints.csv" ) )
 locdim = dim(reoTemplate)
 lowerTrunc=1e-6
-upperTrunc=0.95
+upperTrunc=0.98
 numToTest = sum( demog$isTrain )
 if ( ! exists( "imgList" ) ) {
   imgList = list()
   ptList = list()
+  maskList = list()
   mynums = which( demog$isTrain )
   ct = 1
   for ( k in mynums ) {
-    segisimg = length( grep("csv", demog$fnseg[k] ) ) == 0
-    if ( segisimg ) {
-      img = antsImageRead( demog$fnimg[k] ) %>%
-        denoiseImage( noiseModel="Gaussian") %>%
-        iMath("TruncateIntensity",lowerTrunc,upperTrunc) %>% iMath("Normalize")
-      seg = antsImageRead( demog$fnseg[k] )
-      pts = getCentroids( seg )[,1:img@dimension]
-      if ( k < 10 ) {
-        antsImageWrite( img, paste0('train_examples/temp',k,'.nii.gz') )
-      }
-    }
-    if ( nrow( pts ) == 55 & min(rowSums(abs(pts))) > 0 ) {
-      fittx = fitTransformToPairedPoints( pts, ptTemplate, "Rigid" )
-      rimg = applyAntsrTransformToImage( fittx$transform, img, reoTemplate  )
-      loctxi = invertAntsrTransform( fittx$transform )
-      blobs = applyAntsrTransformToPoint( loctxi, pts )
-      imgList[[ct]] = rimg
-      ptList[[ct]] = blobs
-      cat(paste0(ct,"..."))
-      ct = ct + 1
-      }
+    imgList[[ct]] = antsImageRead( paste0( "preprocessed/", demog$reo[k] ) )
+    ptList[[ct]] = read.csv( paste0( "preprocessed/", demog$pts[k] ) )
+    maskList[[ct]] = antsImageRead( paste0( "preprocessed/", demog$dist[k] ) )
+    ct = ct + 1
     }
   }
-#
+##################################
 if ( ! exists( "imgListTest" ) ) {
+  mynums = which( !demog$isTrain )
   imgListTest = list()
   ptListTest = list()
-  mynums = which( !demog$isTrain )
+  maskListTest = list()
   ct = 1
   for ( k in mynums ) {
-    img = antsImageRead( demog$fnimg[k] ) %>%
-      denoiseImage( noiseModel="Gaussian") %>%
-      iMath("TruncateIntensity",lowerTrunc,upperTrunc) %>% iMath("Normalize")
-    seg = antsImageRead( demog$fnseg[k] )
-    pts = getCentroids( seg )[,1:img@dimension]
-    if ( nrow( pts ) == 55  & min(rowSums(abs(pts))) > 0) {
-      fittx = fitTransformToPairedPoints( pts, ptTemplate, "Rigid" )
-      rimg = applyAntsrTransformToImage( fittx$transform, img, reoTemplate  )
-      loctxi = invertAntsrTransform( fittx$transform )
-      blobs = applyAntsrTransformToPoint( loctxi, pts )
-      imgListTest[[ct]] = rimg
-      ptListTest[[ct]] = blobs
-      cat(paste0(ct,"..."))
-      ct = ct + 1
-      }
+    imgListTest[[ct]] = antsImageRead( paste0( "preprocessed/", demog$reo[k] ) )
+    ptListTest[[ct]] = read.csv( paste0( "preprocessed/", demog$pts[k] ) )
+    maskListTest[[ct]] = antsImageRead( paste0( "preprocessed/", demog$dist[k] ) )
+    ct = ct + 1
     }
   }
 
-nChannelsIn = 1
-nChannelsOut = nrow( ptList[[1]] )
+gc()
+
 mygpu=Sys.getenv("CUDA_VISIBLE_DEVICES")
+nChannelsIn = 1
+nChannelsOut = nrow( ptListTest[[1]] )
 opre = paste0("models/autopointsupdate_192_weights_3d_GPUsigmoidHRMask",mygpu)
 mdlfn = paste0(opre,'.h5')
 mdlfnr = paste0(opre,'_recent.h5')
@@ -109,9 +91,11 @@ generateData <- function( batch_size = 32, mySdAff=0.15, isTest=FALSE, verbose=F
   if ( isTest ) {
     imgListLocal=imgListTest
     ptListLocal=ptListTest
+    maskListLocal = maskListTest
   } else {
     imgListLocal=imgList
     ptListLocal=ptList
+    maskListLocal = maskList
   }
   nBlob = nChannelsOut
   X = array( dim = c( batch_size, locdim, nChannelsIn ) )
@@ -119,6 +103,7 @@ generateData <- function( batch_size = 32, mySdAff=0.15, isTest=FALSE, verbose=F
   Xp = array( dim = c( batch_size, nBlob, reoTemplate@dimension ) )
   ntxparams = reoTemplate@dimension*reoTemplate@dimension # rotation matrix
   Xtx = array( dim = c( batch_size, reoTemplate@dimension, reoTemplate@dimension ) )
+  Xmask = array( dim = c( batch_size, locdim, 1 ) )
   outdim = c( batch_size, locdim, nChannelsOut )
   if ( verbose ) {
     print(dim(X))
@@ -130,7 +115,7 @@ generateData <- function( batch_size = 32, mySdAff=0.15, isTest=FALSE, verbose=F
     whichSample = sample(1:length(imgListLocal),1)
     myseed = sample(1:100000000,1)
     temp = iMath(imgListLocal[[whichSample]],"Normalize")
-    blobs = ptListLocal[[whichSample]]
+    blobs = data.matrix( ptListLocal[[whichSample]] )
     tx = fitTransformToPairedPoints( blobs, ptTemplate, "Rigid" )$transform
     temp = applyAntsrTransformToImage( tx, temp, reoTemplate  )
     blobs = applyAntsrTransformToPoint( invertAntsrTransform( tx ), blobs )
@@ -143,6 +128,8 @@ generateData <- function( batch_size = 32, mySdAff=0.15, isTest=FALSE, verbose=F
     Xp[looper,,]=blobs
     Xtx[looper,,] = matrix(getAntsrTransformParameters(reftx)[1:ntxparams],nrow=reoTemplate@dimension)
     X[looper,,,,1] = as.array( rr[[1]] )
+    tempmask  = applyAntsrTransformToImage( tx, maskListLocal[[whichSample]], reoTemplate, interpolation='nearestNeighbor'  )
+    Xmask[looper,,,,1] = as.array( tempmask )
     for ( jj in 1:reoTemplate@dimension) {
       CC[looper,,,,jj] = as.array( coords[[jj]] )
       }
@@ -153,7 +140,7 @@ generateData <- function( batch_size = 32, mySdAff=0.15, isTest=FALSE, verbose=F
     CC,  # coord conv
     Xp,  # the points
     Xtx, # the transforms
-    gimglist
+    Xmask
   ) ) # input
 }
 ########################
@@ -177,22 +164,27 @@ unetLM = createUnetModel3D(
        additionalOptions = "nnUnetActivationStyle",
        mode = c("sigmoid")
      )
-unetLM = keras_model( unetLM$inputs, layer_multiply( list( unetLM$output, unetLM$input ) ) )
-findpoints = deepLandmarkRegressionWithHeatmaps( unetLM, activation='none', theta=NA )
+# unetLM = keras_model( unetLM$inputs, layer_multiply( list( unetLM$output, unetLM$input ) ) )
+findpoints = deepLandmarkRegressionWithHeatmaps( unetLM, activation='none', theta=NA, useMask=TRUE )
 if ( file.exists( mdlfn ) ) {
   print("Load from prior training history of this model")
   load_model_weights_hdf5( findpoints,  mdlfn )
 }
 
-# testing data inference
-# ggte = generateData( isTest=TRUE  )
-
-
 testingError <- function(  ) {
-  telist = list(  tf$cast( ggte[[1]], mytype), tf$cast( ggte[[2]], mytype) )
+  telist = list(  tf$cast( ggte[[1]], mytype), tf$cast( ggte[[2]], mytype), tf$cast( ggte[[5]], mytype) )
   pointsoutte <- predict( findpoints, telist, batch_size = 1 )
   errvec = tf$losses$MSE( tf$cast( ggte[[3]], mytype), pointsoutte[[2]] )
-  return( as.numeric( tf$reduce_mean( errvec ) ))
+  errsum = as.numeric( tf$reduce_mean( errvec ) )
+  # convert to image
+  timg = as.antsImage( as.array( ggte[[1]][1,,,,1] ) ) %>% antsCopyImageInfo2( reoTemplate )
+  mimg = as.antsImage( as.array( ggte[[5]][1,,,,1] ) ) %>% antsCopyImageInfo2( reoTemplate )
+  ppts = pointsoutte[[2]][1,,]
+  ptsi = makePointsImage( ppts, timg * 0 + 1, 0.5 )
+  antsImageWrite( timg, '/tmp/temp.nii.gz' )
+  antsImageWrite( mimg, '/tmp/tempm.nii.gz' )
+  antsImageWrite( ptsi, '/tmp/tempp.nii.gz' )
+  return( errsum )
   }
 
 reparameterize <- function(mean, logvar) {
@@ -268,10 +260,10 @@ if ( file.exists( lossperfn ) ) {
   lossper = read.csv( lossperfn )
   epoch = nrow( lossper ) + 1
   }
-optimizerEHi <- tf$keras$optimizers$Adam(5e-2)
+optimizerEHi <- tf$keras$optimizers$Adam(1e-2)
 optimizerEMid <- tf$keras$optimizers$Adam(5e-3)
 optimizerELo <- tf$keras$optimizers$Adam(5e-4)
-mmdWeight = tf$cast( 1e-2, mytype)
+mmdWeight = tf$cast( 2e-3, mytype)
 ptWeight = tf$cast( 1, mytype )
 rtWeight = tf$cast( 0.2, mytype )
 
@@ -298,7 +290,8 @@ for (epoch in epoch:num_epochs ) {
       tf$cast(gg[[1]],mytype), # images
       tf$cast(gg[[2]],mytype), # coord conv
       tf$cast(gg[[3]],mytype), # points
-      tf$cast(gg[[4]],mytype) # transform parameters,
+      tf$cast(gg[[4]],mytype), # transform parameters,
+      tf$cast(gg[[5]],mytype) # mask
     )
   })
 
@@ -308,9 +301,10 @@ for (epoch in epoch:num_epochs ) {
   pt_loss = tf$cast(0.0,mytype)
   loss_mmd = tf$cast(0.0,mytype)
   loss_rotation = tf$cast(0.0,mytype)
+  loss_mask = tf$cast( 0.0, mytype )
 
   with(tf$GradientTape(persistent = FALSE) %as% tape, {
-      pointsout <- findpoints( datalist[1:2] )
+      pointsout <- findpoints( datalist[ c(1:2,5)] )
       predpoints = tf$cast( pointsout[[2]], mytype )
       fittx = fitTransformToPairedPointsTF( predpoints, refpoints,
         numberOfPoints=nChannelsOut,
@@ -333,7 +327,8 @@ for (epoch in epoch:num_epochs ) {
       loss_rotation = loss_rotation + tf$reduce_mean( frobnormexp ) * rtWeight
       locptloss = tf$reduce_mean( tf$losses$MSE( datalist[[3]] * ptWeight, predpoints * ptWeight ) )
       pt_loss = pt_loss + locptloss
-      loss = loss + loss_mmd  + pt_loss + loss_rotation
+      loss_mask = loss_mask + tf$reduce_mean(  pointsout[[1]] * datalist[[5]] ) * 1e5
+      loss = loss + loss_mmd  + pt_loss + loss_rotation + loss_mask
     })
   unet_gradients <- tape$gradient(loss, findpoints$variables)
   optimizerE$apply_gradients(purrr::transpose(list(
@@ -344,6 +339,7 @@ for (epoch in epoch:num_epochs ) {
   lossper[epoch,'rot']=as.numeric(loss_rotation)
   lossper[epoch,'mmd']=as.numeric(loss_mmd)
   lossper[epoch,'mmdwt']=as.numeric(mmdWeight)
+  lossper[epoch,'loss_mask']=as.numeric(loss_mask)
   lossper[epoch,'SD']=locsd
   loepoch = (epoch-100)
   if ( loepoch < 1 ) loepoch = 1
@@ -352,13 +348,13 @@ for (epoch in epoch:num_epochs ) {
     print("best-recent")
     }
   write.csv( lossper, lossperfn, row.names=FALSE )
-  if ( epoch %% 10 == 1 & epoch > 20 ) {
+  if ( epoch %% 500 == 1 & epoch > 200 ) {
     with(tf$device("/cpu:0"), {
       lossper[epoch,'testErr']=testingError( )
       })
     if ( lossper[epoch,'testErr'] <= min( lossper[1:epoch,'testErr'], na.rm=TRUE ) ) {
       print("best")
-      save_model_weights_hdf5( findpoints, mdlfn )
+#      save_model_weights_hdf5( findpoints, mdlfn )
       }
     }
   print( tail( lossper, 1 ) )

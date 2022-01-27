@@ -50,9 +50,9 @@ myids = basename( fns ) %>% tools::file_path_sans_ext(T)
 demog = data.frame( ids = myids,
   fnimg=as.character(fns),
   fnseg=gsub( ".nii.gz","-LM.nii.gz", as.character(fns) ) )
-demog = demog[ sample(1:nrow(demog),8),]
+demog = demog[ sample(1:nrow(demog),384),]
 demog$isTrain = TRUE
-demog$isTrain[ sample(1:nrow( demog ),2) ] = FALSE
+demog$isTrain[ sample(1:nrow( demog ),16) ] = FALSE
 
 
 # define an image template that lets us penalize rotations away from this reference

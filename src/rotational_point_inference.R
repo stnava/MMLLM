@@ -14,7 +14,7 @@ library( tfdatasets )
 library( glue )
 mytype = "float32"
 
-orinetInference <- function( template, target, mdlfn, newway=FALSE, verbose=TRUE ) {
+orinetInference <- function( template, target, mdlfn, doreo=NULL, newway=FALSE, verbose=TRUE ) {
 
   # rotation template
   newspc = antsGetSpacing( template ) * 2.0
@@ -48,12 +48,14 @@ orinetInference <- function( template, target, mdlfn, newway=FALSE, verbose=TRUE
     oimg = smoothImage( target, 1.5, sigmaInPhysicalCoordinates = FALSE ) %>%
       iMath("TruncateIntensity",lowerTrunc,upperTrunc) %>% iMath("Normalize")
     # oimg = iMath( target, "TruncateIntensity", 0.01, 0.99 ) %>% iMath("Normalize")
-    imglowreg = antsRegistration( reoTemplateOrinet, oimg, 'Translation' )
-    initialTx = imglowreg$fwdtransforms
-    orinetimg = iMath( imglowreg$warpedmovout, "Normalize" )
   } else {
     oimg = iMath( target, "TruncateIntensity", 0.01, 0.99 ) %>% iMath("Normalize")
-    imglowreg = antsRegistration( reoTemplateOrinet, oimg, 'Translation' )
+    if ( is.null( doreo ) ) {
+      imglowreg = antsRegistration( reoTemplateOrinet, oimg, 'Translation' )
+    } else {
+      reo = reorientImage( oimg , axis1 = doreo )
+      imglowreg = antsRegistration( reoTemplateOrinet, oimg, 'Translation', initialTransform=reo$txfn )
+    }
     initialTx = imglowreg$fwdtransforms
     imglow = imglowreg$warpedmovout
     orinetimg = smoothImage( imglow, 1.5, sigmaInPhysicalCoordinates = FALSE ) %>% iMath("Normalize")
@@ -76,35 +78,45 @@ orinetInference <- function( template, target, mdlfn, newway=FALSE, verbose=TRUE
   setAntsrTransformFixedParameters( myaff, templateCoM )
   # myaff = composeAntsrTransforms( list( myaff, initialTx ) )
   # rotated = applyAntsrTransformToImage( myaff, orinetimg, reoTemplate )
-  if ( verbose ) {
-    print("classical rigid")
-    message("WE ARE RUNNING NEW ORINET" )
-    }
   qreg = antsRegistration( reoTemplateOrinet, imglow, "Rigid", initialTransform=myaff )
   qreg = antsRegistration( reoTemplateOrinet, imglow, "Similarity", initialTransform=qreg$fwdtransforms )
   qreg = antsRegistration( reoTemplateOrinet, imglow, "Affine", initialTransform=qreg$fwdtransforms )
   img2LM = qreg$warpedmovout
-  mymi = antsImageMutualInformation( reoTemplateOrinet, img2LM)
+  mymi = mean( abs( iMath(reoTemplateOrinet,"Normalize") - iMath(img2LM,"Normalize") ) )
   if ( verbose )
-    print( paste( "MI:", mymi ) )
-  return( c( qreg$fwdtransforms, initialTx )  )
+    print( paste( "MI:", mymi, " reo: ", doreo, 'mdl:', mdlfn ) )
+  return( list( c( qreg$fwdtransforms, initialTx ),  mymi ) )
   }
 
 
 reoTemplate = antsImageRead( "templateImage.nii.gz" )
-orinetmdlfn =  "models/mouse_rotation_3D_GPU_update1locsd5.h5"
 tefns = Sys.glob( 'bigdata/*rec.nii.gz' )
-testfn = sample(tefns,1)
 # testfn="bigdata/skull_157_11__rec.nii.gz"
-if ( ! exists('evaldf') ) {
-  evaldf = data.frame( IDs=basename(tefns), MI=NA  )
-  } else evaldf = read.csv( "/tmp/evaldf.csv" )
-for ( k in 1:length( tefns ) ) {
-  oimg = antsImageRead( tefns[k] )
-  transform = orinetInference( reoTemplate, oimg, orinetmdlfn, newway=FALSE, verbose=FALSE )
-  mapped2gether = antsApplyTransforms( reoTemplate, oimg, transform )
-  plot( reoTemplate, mapped2gether, axis=3, nslices=21, ncolumns=7, alpha=0.5 )
-  evaldf[k,'MI']=antsImageMutualInformation( reoTemplate, mapped2gether )
-  print( evaldf[k,] )
-  write.csv( evaldf, "/tmp/evaldf.csv", row.names=FALSE )
+evaldfFN = "evaldfB.csv"
+if ( ! file.exists( evaldfFN ) ) {
+  evaldf = data.frame( IDs=basename(tefns), MI=NA, MIB=NA  )
+  } else evaldf = read.csv( evaldfFN )
+for ( k in sample( 1:nrow( evaldf ) ) ) {
+  print( k )
+  if ( is.na( evaldf[k,'MIB'] ) ) {
+    oimg = antsImageRead( tefns[k] )
+    orinetmdlfn =  "models/mouse_rotation_3D_GPU_update1locsd5.h5"
+    orinetmdlfnB =  "models/mouse_rotation_3D_GPU_update1locsd5b.h5"
+    currentMI = Inf
+    for ( rr in c(NULL,0,1,2) ) {
+      transform = orinetInference( reoTemplate, oimg, orinetmdlfn, doreo=rr, newway=FALSE, verbose=T )
+      transformB = orinetInference( reoTemplate, oimg, orinetmdlfnB, doreo=rr, newway=FALSE, verbose=T )
+      if ( transformB[[2]] < transform[[2]]) transform=transformB
+      if ( transform[[2]]  < currentMI ) {
+        transformX = transform[[1]]
+        currentMI = transform[[2]]
+      }
+    }
+    mapped2gether = antsApplyTransforms( reoTemplate, oimg, transformX )
+    evaldf[k,'MI']=antsImageMutualInformation( reoTemplate, mapped2gether )
+    evaldf[k,'MAE']=mean( abs( reoTemplate - mapped2gether ) )
+    print( evaldf[k,] )
+    plot(  mapped2gether, axis=3, nslices=21, ncolumns=7, alpha=0.5 )
+    write.csv( evaldf, evaldfFN, row.names=FALSE )
+  }
 }
