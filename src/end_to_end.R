@@ -108,25 +108,26 @@ orinetInferenceMulti <- function( template, target, orinetmdlfn ) {
 
 ############# none of these used in train/test
 valids = c(
-"152-27__rec",
-"152-29__rec",
-"152-30__rec",
-"skull_152_8__rec",
-"skull_155_10__rec",
-"skull_155_11__rec",
-"skull_155_13__rec",
-"skull_155_14__rec",
-"skull_155_17__rec",
-"skull_155_18__rec",
-"skull_155_19__rec",
-"skull_160_1__rec",
-"skull_160_6__rec" )
+  "152-27__rec",
+  "152-29__rec",
+  "152-30__rec",
+  "skull_152_8__rec",
+  "skull_155_10__rec",
+  "skull_155_11__rec",
+  "skull_155_13__rec",
+  "skull_155_14__rec",
+  "skull_155_17__rec",
+  "skull_155_18__rec",
+  "skull_155_19__rec",
+  "skull_160_1__rec",
+  "skull_160_6__rec" )
 
 
 lowerTrunc=1e-6
 upperTrunc=0.98
-fn = 'bigdata/160-41__rec.nii.gz'
-fn = Sys.glob( paste0( "bigdata/", valids[5], ".nii.gz" ) )
+fn = Sys.glob( paste0( "bigdata/", valids[12], ".nii.gz" ) )
+istest = TRUE
+if ( istest ) fn = 'bigdata/160-41__rec.nii.gz'
 oimg = antsImageRead( fn )
 
 # 1. denoise - p = 1 or p = 2 seem to be good - should optimize for all and implement via unet for speed
@@ -163,6 +164,7 @@ iTx = antsApplyTransforms( reoTemplate, img, templateTx )
 iTx2 = antsApplyTransforms( reoTemplate, oimg, templateTx )
 iSeg = antsApplyTransforms( reoTemplate, segimg, templateTx )
 mival = antsImageMutualInformation( reoTemplate, iTx )
+print( paste("Registration:", mival ) )
 # mival seems to be < -0.15 if its a reasonable result - usually around -0.2
 # should visually check this result - hard to verify will work for *all* images
 plot(  iTx, axis=3, nslices=21, ncolumns=7, alpha=0.5 )
@@ -190,11 +192,18 @@ unetLM = createUnetModel3D(
      )
 findpoints = deepLandmarkRegressionWithHeatmaps( unetLM, activation='none', theta=NA, useMask=gaussIt )
 load_model_weights_hdf5( findpoints, 'models/autopointsupdate_192_weights_3d_GPUsigmoidHRMask2.h5' )
-######### generate the heatmap
-tempmask = thresholdImage(iSeg,0.85,1.0) %>% iMath("GetLargestComponent")
-tempmask = exp( -1.0 * iMath( tempmask, "D" ) / 0.5 )
 ######### prepare the input data
 iTx2T = iMath( iTx2, 'TruncateIntensity', 1e-6, 0.98 )
+
+if ( istest ) {
+  skullfn = 'preprocessed/160-41__rec-pro-skull.nii.gz'
+  iSeg = antsImageRead( skullfn )
+  iTx2T = antsImageRead( "preprocessed/160-41__rec-pro-reorient.nii.gz")
+}
+# here is the heatmap
+tempmask = thresholdImage(iSeg,0.85,1.0) %>% iMath("GetLargestComponent")
+tempmask = exp( -1.0 * iMath( tempmask, "D" ) / 0.5 )
+
 imgarr = array( as.array( iTx2T ), c( 1, dim(iTx2T), 1 ) )
 segarr = array( as.array( tempmask ), c( 1, dim(iTx2T), 1 ) )
 ccarr = array( dim=c( 1, dim(iTx), 3  ) )
@@ -210,3 +219,13 @@ antsImageWrite( ptsi, '/tmp/tempp.nii.gz' )
 locmaps = tf$reduce_sum( pointsoutte[[1]] , axis=4L )
 locmap = as.antsImage( as.array( locmaps )[1,,,] ) %>% antsCopyImageInfo2( reoTemplate )
 antsImageWrite( locmap, '/tmp/temph.nii.gz' )
+
+
+
+# validation
+lmfn = gsub( "rec.nii.gz", "rec-LM.nii.gz", fn )
+lms = getCentroids( antsImageRead( lmfn ) )[,1:3]
+lmsmap = antsApplyTransformsToPoints( 3, data.matrix(lms), rev(templateTx), whichtoinvert=c(TRUE,TRUE) )
+denom  = norm( data.matrix( lmsmap ) )
+numer = norm( data.matrix( lmsmap ) - ppts )
+print( numer/denom  )
