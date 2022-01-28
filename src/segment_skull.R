@@ -36,7 +36,7 @@ demog$isTrain[ sample(1:nrow( demog ), 16 ) ] = FALSE
 
 # define an image template that lets us penalize rotations away from this reference
 reoTemplate = antsImageRead( "templateImage.nii.gz" )
-newspc = antsGetSpacing( reoTemplate )
+newspc = antsGetSpacing( reoTemplate ) * 1.22 # 
 reoTemplate = resampleImage( reoTemplate, newspc ) %>%
   iMath( "PadImage", 32 )%>%
   iMath( "Normalize" )

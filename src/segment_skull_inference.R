@@ -24,10 +24,11 @@ lowerTrunc=1e-6
 upperTrunc=0.98
 set.seed( 2 )
 fns = Sys.glob("bigdata/skull_155_10*rec.nii.gz")
+fns = Sys.glob( "bigdata/152-30*rec.nii.gz" )
 fn = fns[1]
 oimg = antsImageRead( fn )
-# img = denoiseImage( oimg, noiseModel='Gaussian') # slower, maybe better
-img = smoothImage( oimg, 0.5, sigmaInPhysicalCoordinates=FALSE )
+img = denoiseImage( oimg, noiseModel='Gaussian', p = 2 ) # slower, maybe better
+# img = smoothImage( oimg, 0.5, sigmaInPhysicalCoordinates=FALSE )
 img = iMath( img, "TruncateIntensity", lowerTrunc, upperTrunc ) %>% iMath("Normalize")
 nChannelsIn = 1
 nChannelsOut = 1
