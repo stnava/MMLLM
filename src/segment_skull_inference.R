@@ -26,17 +26,9 @@ set.seed( 2 )
 fns = Sys.glob("bigdata/skull_155_10*rec.nii.gz")
 fn = fns[1]
 oimg = antsImageRead( fn )
-img = denoiseImage( oimg, noiseModel='Gaussian')
+# img = denoiseImage( oimg, noiseModel='Gaussian') # slower, maybe better
+img = smoothImage( oimg, 0.5, sigmaInPhysicalCoordinates=FALSE )
 img = iMath( img, "TruncateIntensity", lowerTrunc, upperTrunc ) %>% iMath("Normalize")
-
-
-# define an image template that lets us penalize rotations away from this reference
-reoTemplate = antsImageRead( "templateImage.nii.gz" )
-newspc = antsGetSpacing( reoTemplate ) # * 1.22
-reoTemplate = resampleImage( reoTemplate, newspc ) %>%
-  iMath( "PadImage", 32 )%>%
-  iMath( "Normalize" )
-locdim = dim(reoTemplate)
 nChannelsIn = 1
 nChannelsOut = 1
 mdlfn = "models/mouse_skull_seg_from_ct_3.h5"
@@ -56,9 +48,22 @@ unetSkull = createUnetModel3D(
      )
 load_model_weights_hdf5( unetSkull,  mdlfn )
 
-reg = antsRegistration( reoTemplate, img, 'Affine' )
-iarr = array( as.array( reg$warpedmovout ), dim = c( 1, dim( reoTemplate ), 1 ) )
+iarr = array( as.array( img ), dim = c( 1, dim( img ), 1 ) )
 skullout <- predict( unetSkull, tf$cast( iarr, mytype), batch_size = 1 )
-segimg = as.antsImage( skullout[1,,,,1] ) %>% antsCopyImageInfo2( reoTemplate ) %>%
-  thresholdImage(0.5,1)
-plot( reg$warpedmovout, segimg, nslices=21, ncol=7, axis=1 )
+segimg = as.antsImage( skullout[1,,,,1] ) %>% antsCopyImageInfo2( img )
+antsImageWrite( thresholdImage(segimg,0.5,1), '/tmp/temp.nii.gz' )
+print( paste( fn , "done" ) )
+plot( img, segimg, nslices=21, ncol=7, axis=1 )
+
+# now do the same in the reo space
+reoTemplate = antsImageRead( "templateImage.nii.gz" ) %>% iMath("PadImage",32)
+reg = antsRegistration( reoTemplate, img, 'Affine' )
+imgw = reg$warpedmovout
+iarr = array( as.array( imgw ), dim = c( 1, dim( imgw ), 1 ) )
+skullout <- predict( unetSkull, tf$cast( iarr, mytype), batch_size = 1 )
+segimg = as.antsImage( skullout[1,,,,1] ) %>% antsCopyImageInfo2( reoTemplate )
+segimg = antsApplyTransforms( img, segimg, reg$fwdtransforms, whichtoinvert = TRUE )
+segbig = thresholdImage(segimg,0.5,1) %>% iMath("GetLargestComponent")
+antsImageWrite( segbig, '/tmp/temp2.nii.gz' )
+print( paste( fn , "done" ) )
+plot( img, segimg, nslices=21, ncol=7, axis=1 )
