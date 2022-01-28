@@ -24,16 +24,16 @@ set.seed( 2 )
 fns = Sys.glob("preprocessed/*skull.nii.gz")
 myids = basename( fns )
 myids = gsub( "skull.nii.gz", "", myids )
-postfix = c( "reorient.nii.gz", "skulldist.nii.gz", "pts.csv" )
+postfix = c( "reorient.nii.gz", "skull.nii.gz", "pts.csv" )
 demog = data.frame(
   ids = myids,
   reo = paste0( myids, postfix[1]),
   dist = paste0( myids, postfix[2]),
   pts = paste0( myids, postfix[3]) )
 
-demog = demog[ sample(1:nrow(demog),256),]
+# demog = demog[ sample(1:nrow(demog),256),]
 demog$isTrain = TRUE
-demog$isTrain[ sample(1:nrow( demog ), 16 ) ] = FALSE
+demog$isTrain[ sample(1:nrow( demog ), 64 ) ] = FALSE
 
 # define an image template that lets us penalize rotations away from this reference
 reoTemplate = antsImageRead( "templateImage.nii.gz" )
@@ -46,6 +46,9 @@ ptTemplate = data.matrix( read.csv( "templatePoints.csv" ) )
 locdim = dim(reoTemplate)
 lowerTrunc=1e-6
 upperTrunc=0.98
+gaussIt = TRUE
+inferenceInds = c( 1:2 )
+if ( gaussIt ) inferenceInds = c( 1:2, 5 )
 numToTest = sum( demog$isTrain )
 if ( ! exists( "imgList" ) ) {
   imgList = list()
@@ -75,6 +78,7 @@ if ( ! exists( "imgListTest" ) ) {
     }
   }
 
+print("done collecting")
 gc()
 
 mygpu=Sys.getenv("CUDA_VISIBLE_DEVICES")
@@ -116,25 +120,26 @@ generateData <- function( batch_size = 32, mySdAff=0.15, isTest=FALSE, verbose=F
     myseed = sample(1:100000000,1)
     temp = iMath(imgListLocal[[whichSample]],"Normalize")
     blobs = data.matrix( ptListLocal[[whichSample]] )
-    tx = fitTransformToPairedPoints( blobs, ptTemplate, "Rigid" )$transform
-    temp = applyAntsrTransformToImage( tx, temp, reoTemplate  )
-    blobs = applyAntsrTransformToPoint( invertAntsrTransform( tx ), blobs )
     rr = randomAffineImage( temp, transformType='ScaleShear', sdAffine=mySdAff, seeder = myseed )
     loctx = rr[[2]]
     loctxi = invertAntsrTransform( loctx )
     blobs = applyAntsrTransformToPoint( loctxi, as.matrix( blobs ) )
     reftx=fitTransformToPairedPoints( blobs, ptTemplate, transformType='Rigid')$transform
-    coords = coordinateImages( rr[[1]] * 0 + 1 )
     Xp[looper,,]=blobs
     Xtx[looper,,] = matrix(getAntsrTransformParameters(reftx)[1:ntxparams],nrow=reoTemplate@dimension)
-    X[looper,,,,1] = as.array( rr[[1]] )
-    tempmask  = applyAntsrTransformToImage( tx, maskListLocal[[whichSample]], reoTemplate, interpolation='nearestNeighbor'  )
+    tempimg = applyAntsrTransformToImage( loctx, imgListLocal[[whichSample]], reoTemplate  )
+    X[looper,,,,1] = as.array( tempimg )
+    tempmask = applyAntsrTransformToImage( loctx, maskListLocal[[whichSample]], reoTemplate  )
+    tempmask = iMath( tempmask, "D" )
+    if ( gaussIt ) tempmask = exp( -1.0 * tempmask / 0.5 )
     Xmask[looper,,,,1] = as.array( tempmask )
+    coords = coordinateImages( tempimg * 0 + 1 )
     for ( jj in 1:reoTemplate@dimension) {
       CC[looper,,,,jj] = as.array( coords[[jj]] )
       }
     gimglist[[looper]] = rr[[1]]
     }
+  gc()
   return( list(
     X,   # the images
     CC,  # coord conv
@@ -164,15 +169,18 @@ unetLM = createUnetModel3D(
        additionalOptions = "nnUnetActivationStyle",
        mode = c("sigmoid")
      )
-# unetLM = keras_model( unetLM$inputs, layer_multiply( list( unetLM$output, unetLM$input ) ) )
-findpoints = deepLandmarkRegressionWithHeatmaps( unetLM, activation='none', theta=NA, useMask=TRUE )
+findpoints = deepLandmarkRegressionWithHeatmaps( unetLM, activation='none', theta=NA, useMask=gaussIt )
+
+initfn = 'models/autopointsupdate_softmax_176_weights_3d_checkpoints5_GPUsigmoidHR2.h5'
+# load_model_weights_hdf5( findpoints,  initfn )
 if ( file.exists( mdlfn ) ) {
   print("Load from prior training history of this model")
   load_model_weights_hdf5( findpoints,  mdlfn )
 }
 
 testingError <- function(  ) {
-  telist = list(  tf$cast( ggte[[1]], mytype), tf$cast( ggte[[2]], mytype), tf$cast( ggte[[5]], mytype) )
+  if ( gaussIt ) telist = list(  tf$cast( ggte[[1]], mytype), tf$cast( ggte[[2]], mytype), tf$cast( ggte[[5]], mytype) )
+  if ( ! gaussIt ) telist = list(  tf$cast( ggte[[1]], mytype), tf$cast( ggte[[2]], mytype) )
   pointsoutte <- predict( findpoints, telist, batch_size = 1 )
   errvec = tf$losses$MSE( tf$cast( ggte[[3]], mytype), pointsoutte[[2]] )
   errsum = as.numeric( tf$reduce_mean( errvec ) )
@@ -184,6 +192,10 @@ testingError <- function(  ) {
   antsImageWrite( timg, '/tmp/temp.nii.gz' )
   antsImageWrite( mimg, '/tmp/tempm.nii.gz' )
   antsImageWrite( ptsi, '/tmp/tempp.nii.gz' )
+  # get the sum of the locating maps
+  locmaps = tf$reduce_sum( pointsoutte[[1]] , axis=4L )
+  locmap = as.antsImage( as.array( locmaps )[1,,,] ) %>% antsCopyImageInfo2( reoTemplate )
+  antsImageWrite( locmap, '/tmp/temph.nii.gz' )
   return( errsum )
   }
 
@@ -263,9 +275,11 @@ if ( file.exists( lossperfn ) ) {
 optimizerEHi <- tf$keras$optimizers$Adam(1e-2)
 optimizerEMid <- tf$keras$optimizers$Adam(5e-3)
 optimizerELo <- tf$keras$optimizers$Adam(5e-4)
+optimizerE = optimizerEMid
 mmdWeight = tf$cast( 2e-3, mytype)
 ptWeight = tf$cast( 1, mytype )
 rtWeight = tf$cast( 0.2, mytype )
+htWeight = tf$cast( 5e0, mytype )
 
 # define reference points constant across batches
 refpoints = tf$cast( ptTemplate, mytype )
@@ -277,13 +291,13 @@ refpoints = tf$stack( refptlist )
 ##################################
 for (epoch in epoch:num_epochs ) {
   locsd = 0.1
-  ss = sample( 1:3 , 1 )
-  if ( epoch %% 25 & ss == 1 ) # lower gradient step size when closer to good model
-    optimizerE <- optimizerEHi
-  if (  epoch %% 25 & ss == 2  ) # lower gradient step size when closer to good model
-    optimizerE <- optimizerEMid
-  if (  epoch %% 25 & ss == 3  ) # lower gradient step size when closer to good model
-    optimizerE <- optimizerELo
+#  ss = sample( 1:3 , 1 )
+#  if ( epoch %% 25 & ss == 1 ) # lower gradient step size when closer to good model
+#    optimizerE <- optimizerEHi
+#  if (  epoch %% 25 & ss == 2  ) # lower gradient step size when closer to good model
+#    optimizerE <- optimizerEMid
+#  if (  epoch %% 25 & ss == 3  ) # lower gradient step size when closer to good model
+#    optimizerE <- optimizerELo
   with(tf$device("/cpu:0"), {
     gg = generateData( batch_size = generator_batch_size,  mySdAff=locsd, verbose=FALSE  )
     datalist = list(
@@ -304,7 +318,7 @@ for (epoch in epoch:num_epochs ) {
   loss_mask = tf$cast( 0.0, mytype )
 
   with(tf$GradientTape(persistent = FALSE) %as% tape, {
-      pointsout <- findpoints( datalist[ c(1:2,5)] )
+      pointsout <- findpoints( datalist[ inferenceInds ] )
       predpoints = tf$cast( pointsout[[2]], mytype )
       fittx = fitTransformToPairedPointsTF( predpoints, refpoints,
         numberOfPoints=nChannelsOut,
@@ -327,8 +341,8 @@ for (epoch in epoch:num_epochs ) {
       loss_rotation = loss_rotation + tf$reduce_mean( frobnormexp ) * rtWeight
       locptloss = tf$reduce_mean( tf$losses$MSE( datalist[[3]] * ptWeight, predpoints * ptWeight ) )
       pt_loss = pt_loss + locptloss
-      loss_mask = loss_mask + tf$reduce_mean(  pointsout[[1]] * datalist[[5]] ) * 1e5
-      loss = loss + loss_mmd  + pt_loss + loss_rotation + loss_mask
+      # loss_mask = loss_mask + ( as.numeric(gaussIt) + tf$reduce_mean( pointsout[[1]] * datalist[[5]] ) ) * htWeight
+      loss = loss + loss_mmd  + pt_loss + loss_rotation # + loss_mask
     })
   unet_gradients <- tape$gradient(loss, findpoints$variables)
   optimizerE$apply_gradients(purrr::transpose(list(
@@ -354,7 +368,7 @@ for (epoch in epoch:num_epochs ) {
       })
     if ( lossper[epoch,'testErr'] <= min( lossper[1:epoch,'testErr'], na.rm=TRUE ) ) {
       print("best")
-#      save_model_weights_hdf5( findpoints, mdlfn )
+      save_model_weights_hdf5( findpoints, mdlfn )
       }
     }
   print( tail( lossper, 1 ) )

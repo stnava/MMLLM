@@ -229,3 +229,6 @@ lmsmap = antsApplyTransformsToPoints( 3, data.matrix(lms), rev(templateTx), whic
 denom  = norm( data.matrix( lmsmap ) )
 numer = norm( data.matrix( lmsmap ) - ppts )
 print( numer/denom  )
+###################################################
+ptsi = makePointsImage( lmsmap, iTx * 0 + 1, 0.5 )
+antsImageWrite( ptsi, '/tmp/temppgt.nii.gz' )
