@@ -50,7 +50,6 @@ myids = basename( fns ) %>% tools::file_path_sans_ext(T)
 demog = data.frame( ids = myids,
   fnimg=as.character(fns),
   fnseg=gsub( ".nii.gz","-LM.nii.gz", as.character(fns) ) )
-demog = demog[ sample(1:nrow(demog),384),]
 demog$isTrain = TRUE
 demog$isTrain[ sample(1:nrow( demog ),16) ] = FALSE
 
@@ -246,7 +245,8 @@ testingError <- function( mySdAff ) {
 
 
 #
-orinetOld =  createResNetModel3D(
+if ( FALSE )
+  orinetOld =  createResNetModel3D(
        list(NULL,NULL,NULL,1),
        inputScalarsSize = 0,
        numberOfClassificationLabels = 6,
@@ -298,14 +298,14 @@ for ( locsdct in length(locsds):length(locsds) ) {
   if ( locsd >= 0.5 ) num_epochs = 100
   if ( locsd >= 1.0 ) num_epochs = 40000
   mygpu=Sys.getenv("CUDA_VISIBLE_DEVICES")
-  opre = paste0("models/mouse_rotation_3D_GPU_update",mygpu,"locsd",locsd)
+  opre = paste0("models/mouse_rotation_3D_GPU_blizzard",mygpu,"locsd",locsd)
   mdlfn = paste0(opre,'.h5')
   mdlfnr = paste0(opre,'_recent.h5')
   lossperfn = paste0(opre,'_training_history.csv')
   if ( file.exists( mdlfn ) )
     load_model_weights_hdf5( orinet,  mdlfn )
   # Training loop -----------------------------------------------------------
-  optimizerE <- tf$keras$optimizers$Adam(1e-5)
+  optimizerE <- tf$keras$optimizers$Adam(1e-6)
   lossper = data.frame( loss=NA, rotval=NA, mseval=NA, SD=NA, testErr=NA,
     runningmean=NA )
   epoch=1
@@ -350,10 +350,12 @@ for ( locsdct in length(locsds):length(locsds) ) {
   #    save_model_weights_hdf5( orinet, mdlfnr )
       }
     write.csv( lossper, lossperfn, row.names=FALSE )
+    lossper[epoch,'best']=FALSE
     if ( epoch %% 5 == 1  ) {
       lossper[epoch,'testErr']=as.numeric( testingError( locsd ) )
       if ( lossper[epoch,'testErr'] < min( lossper[1:(epoch-1),'testErr'], na.rm=T ) ) {
         print("best")
+        lossper[epoch,'best']=TRUE
         save_model_weights_hdf5( orinet, mdlfn )
         }
       }

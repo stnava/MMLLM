@@ -1,8 +1,13 @@
+#!/usr/bin/env Rscript
+args<-commandArgs(TRUE)
+
+whichk <- args[1]
+
 # 1. denoise the image
 # 2. segment it
 # 3. reorient
 # 4. landmark
-
+istest=FALSE
 ############# setup
 Sys.setenv("TF_NUM_INTEROP_THREADS"=24)
 Sys.setenv("TF_NUM_INTRAOP_THREADS"=24)
@@ -95,7 +100,7 @@ orinetInference <- function( template, target, mdlfn, doreo=NULL, newway=FALSE, 
 orinetInferenceMulti <- function( template, target, orinetmdlfn ) {
   currentMI = Inf
   currentMSQ = Inf
-  for ( rr in c(NULL,0,1,2,3:6) ) {
+  for ( rr in c(NULL,0,1,2,3:12) ) {
     transform = orinetInference( reoTemplate, oimg, orinetmdlfn, doreo=rr, newway=FALSE, verbose=T )
     if ( transform[[2]]  < currentMSQ  &   transform[[3]]  < currentMI ) {
       transformX = transform[[1]]
@@ -125,9 +130,15 @@ valids = c(
 
 lowerTrunc=1e-6
 upperTrunc=0.98
-fn = Sys.glob( paste0( "bigdata/", valids[12], ".nii.gz" ) )
-istest = TRUE
-if ( istest ) fn = 'bigdata/160-41__rec.nii.gz'
+fn = Sys.glob( paste0( "bigdata/*rec.nii.gz" ) )
+if ( is.na( whichk ) ) fn = sample( fn, 1 )
+fn = Sys.glob( paste0( "bigdata/155-35**rec.nii.gz" ) )
+fn = Sys.glob( paste0( "bigdata/skull_155_21_*rec.nii.gz" ) ) # 159-25__rec_
+outfn = paste0( "preprocessed2/", basename( fn ) %>% tools::file_path_sans_ext( T ), "_reorient.png"  )
+if ( file.exists( outfn ) ) q("no")
+print( paste("Begin:", fn ) )
+# istest = TRUE
+# if ( istest ) fn = 'bigdata/160-41__rec.nii.gz'
 oimg = antsImageRead( fn )
 
 # 1. denoise - p = 1 or p = 2 seem to be good - should optimize for all and implement via unet for speed
@@ -154,12 +165,13 @@ load_model_weights_hdf5( unetSkull, skullmdlfn )
 iarr = array( as.array( img ), dim = c( 1, dim( img ), 1 ) )
 skullout <- predict( unetSkull, tf$cast( iarr, mytype), batch_size = 1 )
 segimg = as.antsImage( skullout[1,,,,1] ) %>% antsCopyImageInfo2( img )
-segimg_bin = thresholdImage( segimg, 0.5, 1.0 ) # segimg is sufficient for LM
+segimg_bin = thresholdImage( segimg, 0.6, 1.0 ) %>% iMath("GetLargestComponent") # segimg is sufficient for LM
 
 # 3. reorient to template space
 # now do the same in the reo space
 reoTemplate = antsImageRead( "templateImage.nii.gz" ) %>% iMath("PadImage",8)
-templateTx = orinetInferenceMulti( reoTemplate, img, "models/mouse_rotation_3D_GPU_update1locsd5.h5" )
+reoSkull = antsImageRead( "templateImage_skull.nii.gz") %>% iMath("PadImage",8)
+templateTx = orinetInferenceMulti( reoSkull, segimg_bin, "models/mouse_rotation_3D_GPU_update1locsd5.h5" )
 iTx = antsApplyTransforms( reoTemplate, img, templateTx )
 iTx2 = antsApplyTransforms( reoTemplate, oimg, templateTx )
 iSeg = antsApplyTransforms( reoTemplate, segimg, templateTx )
@@ -167,6 +179,16 @@ mival = antsImageMutualInformation( reoTemplate, iTx )
 print( paste("Registration:", mival ) )
 # mival seems to be < -0.15 if its a reasonable result - usually around -0.2
 # should visually check this result - hard to verify will work for *all* images
+outfn = paste0( "preprocessed2/", basename( fn ) %>% tools::file_path_sans_ext( T ), "_reorient.nii.gz" )
+antsImageWrite( iTx, outfn )
+outfn = paste0( "preprocessed2/", basename( fn ) %>% tools::file_path_sans_ext( T ), "_skullprob.nii.gz" )
+antsImageWrite( iSeg, outfn )
+lmfn = gsub( "rec.nii.gz", "rec-LM.nii.gz", fn )
+lms = getCentroids( antsImageRead( lmfn ) )[,1:3]
+lmsmap = antsApplyTransformsToPoints( 3, data.matrix(lms), rev(templateTx), whichtoinvert=c(TRUE,TRUE) )
+outfn = paste0( "preprocessed2/", basename( fn ) %>% tools::file_path_sans_ext( T ), "_pts.csv"  )
+write.csv( lmsmap, outfn, row.names=FALSE )
+outfn = paste0( "preprocessed2/", basename( fn ) %>% tools::file_path_sans_ext( T ), "_reorient.png"  )
 plot(  iTx, axis=3, nslices=21, ncolumns=7, alpha=0.5 )
 
 # 4. the landmarking problem - important to have preprocessing right
@@ -223,9 +245,6 @@ antsImageWrite( locmap, '/tmp/temph.nii.gz' )
 
 
 # validation
-lmfn = gsub( "rec.nii.gz", "rec-LM.nii.gz", fn )
-lms = getCentroids( antsImageRead( lmfn ) )[,1:3]
-lmsmap = antsApplyTransformsToPoints( 3, data.matrix(lms), rev(templateTx), whichtoinvert=c(TRUE,TRUE) )
 denom  = norm( data.matrix( lmsmap ) )
 numer = norm( data.matrix( lmsmap ) - ppts )
 print( numer/denom  )
