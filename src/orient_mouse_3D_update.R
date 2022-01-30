@@ -14,14 +14,6 @@ library( glue )
 library( pracma ) # just for cross function ie vector cross product
 mytype = "float32"
 
-
-# +     img = antsImageRead( demog$fnimg[k] ) %>%
-# +       iMath("TruncateIntensity",0.01,0.99) %>%
-# +       iMath("Normalize")
-# +     img = smoothImage( img, 1.5, sigmaInPhysicalCoordinates = FALSE ) %>%
-# +       iMath("Normalize")
-
-
 ####################################################################################
 ################ SEE: Representation learning with MMD-VAE
 # SEE:  An Analysis of SVD for Deep Rotation Estimation
@@ -44,153 +36,84 @@ negateI <- function( x ) {
   max( x ) - x
 }
 
+
 set.seed( 2 )
-fns = Sys.glob("bigdata/*rec.nii.gz")
+fns = Sys.glob("preprocessed4/*rec_reorient.nii.gz")
 myids = basename( fns ) %>% tools::file_path_sans_ext(T)
 demog = data.frame( ids = myids,
-  fnimg=as.character(fns),
-  fnseg=gsub( ".nii.gz","-LM.nii.gz", as.character(fns) ) )
+  fnimg=as.character(fns)  )
 demog$isTrain = TRUE
 demog$isTrain[ sample(1:nrow( demog ),16) ] = FALSE
-
 
 # define an image template that lets us penalize rotations away from this reference
 # templatenum=10
 reoTemplate = antsImageRead( "templateImage.nii.gz" ) %>% iMath("Normalize")
-newspc = 4.0 * antsGetSpacing( reoTemplate )
+newspc = 2.76 * antsGetSpacing( reoTemplate )
 reoTemplate = resampleImage( reoTemplate, newspc ) %>% iMath( "PadImage", 32 )
 ptTemplate = data.matrix( read.csv( "templatePoints.csv" ) )# ptListTest[[templatenum]]
 locdim = dim(reoTemplate)
-lowerTrunc=1e-6
-upperTrunc=0.95
 
 
 numToTest = sum( demog$isTrain )
 if ( ! exists( "imgList" ) ) {
   imgList = list()
-  ptList = list()
   mynums = which( demog$isTrain )
   ct = 1
   for ( k in mynums ) {
-    segisimg = length( grep("csv", demog$fnseg[k] ) ) == 0
-    if ( segisimg ) {
-      # this is what we try next
-      # img = antsImageRead( demog$fnimg[k] ) %>%
-      #  denoiseImage( noiseModel="Gaussian") %>%
-      #  iMath("TruncateIntensity",lowerTrunc,upperTrunc) %>% iMath("Normalize")
-
-      # trained like this
-      img = antsImageRead( demog$fnimg[k] ) %>%
-        iMath("TruncateIntensity",0.01,0.99) %>%
-          iMath("Normalize")
-      img = smoothImage( img, 1.5, sigmaInPhysicalCoordinates = FALSE ) %>%
-         iMath("Normalize")
-      seg = antsImageRead( demog$fnseg[k] )
-      pts = getCentroids( seg )[,1:img@dimension]
-    }
-    if ( nrow( pts ) == 55 & min(rowSums(abs(pts))) > 0 ) {
-      fittx = fitTransformToPairedPoints( pts, ptTemplate, "Rigid" )
-      rimg = applyAntsrTransformToImage( fittx$transform, img, reoTemplate  )
-      loctxi = invertAntsrTransform( fittx$transform )
-      blobs = applyAntsrTransformToPoint( loctxi, pts )
-      imgList[[ct]] = rimg
-      ptList[[ct]] = blobs
-      cat(paste0(ct,"..."))
-      ct = ct + 1
-      }
+    img = antsImageRead( demog$fnimg[k] )
+    imgList[[ct]] = img
+    cat(paste0(ct,"..."))
+    ct = ct + 1
     }
   }
 
 if ( ! exists( "imgListTest" ) ) {
   imgListTest = list()
-  ptListTest = list()
-  mynums = which( !demog$isTrain )
+  mynums = which( ! demog$isTrain )
   ct = 1
   for ( k in mynums ) {
-    # this is what we try next
-    # img = antsImageRead( demog$fnimg[k] ) %>%
-    #  denoiseImage( noiseModel="Gaussian") %>%
-    #  iMath("TruncateIntensity",lowerTrunc,upperTrunc) %>% iMath("Normalize")
-
-    # trained like this
-    img = antsImageRead( demog$fnimg[k] ) %>%
-      iMath("TruncateIntensity",0.01,0.99) %>%
-        iMath("Normalize")
-    img = smoothImage( img, 1.5, sigmaInPhysicalCoordinates = FALSE ) %>%
-       iMath("Normalize")
-
-    seg = antsImageRead( demog$fnseg[k] )
-    pts = getCentroids( seg )[,1:img@dimension]
-    if ( nrow( pts ) == 55  & min(rowSums(abs(pts))) > 0) {
-      fittx = fitTransformToPairedPoints( pts, ptTemplate, "Rigid" )
-      rimg = applyAntsrTransformToImage( fittx$transform, img, reoTemplate  )
-      loctxi = invertAntsrTransform( fittx$transform )
-      blobs = applyAntsrTransformToPoint( loctxi, pts )
-      imgListTest[[ct]] = rimg
-      ptListTest[[ct]] = blobs
-      cat(paste0(ct,"..."))
-      ct = ct + 1
-      }
+    img = antsImageRead( demog$fnimg[k] )
+    imgListTest[[ct]] = img
+    cat(paste0(ct,"..."))
+    ct = ct + 1
     }
   }
-
-
 
 ###############################
 generateData <- function( batch_size = 32, mySdAff=0.15, isTest=FALSE, verbose=FALSE ) {
   if ( isTest ) {
     imgListLocal = imgListTest
-    ptListLocal = ptListTest
   } else {
     imgListLocal = imgList
-    ptListLocal = ptList
   }
   locdim = dim( reoTemplate )
   X = array( dim = c( batch_size, locdim, 1 ) )
   Y = array( dim = c( batch_size, 6 ) )
-  matlist = list()
-  fitlist = list()
+  matlist=list()
   for ( looper in 1:batch_size ) {
     whichSample = sample(1:length(imgListLocal),1)
     myseed = sample(1:100000000,1)
     locaff=mySdAff
-      temp = iMath( imgListLocal[[whichSample]], "Normalize" )
-      blobs0 = ptListLocal[[whichSample]]
-      rr = randomAffineImage( temp, "Rigid", sdAffine=locaff, seeder = myseed )
-      loctx = rr[[2]]
-      loctxi = invertAntsrTransform( loctx )
-      blobs = applyAntsrTransformToPoint( loctxi, blobs0 )
-      fittx = fitTransformToPairedPoints( blobs, ptTemplate, "Rigid" )$transform
-      if ( FALSE ) {
-        registered = applyAntsrTransformToImage( fittx, rr[[1]], reoTemplate  )
-        mpi0=makePointsImage(blobs0,temp*0+1,radius=12 )
-        mpi1=makePointsImage(blobs,rr[[1]]*0+1,radius=12 )
-        layout( matrix(1:2,nrow=1))
-        plot( temp, iMath( mpi0, "GD", 2 ), nslices=15, ncolumns=5 )
-        plot( rr[[1]], iMath( mpi1, "GD", 2 ), nslices=15, ncolumns=5 )
-        plot( reoTemplate, registered, nslices=15, ncolumns=5, alpha=0.5 )
-        }
-      rr[[2]] = loctx = fittx
-      temp = rr[[1]]
-
-    rotmat = matrix( getAntsrTransformParameters( loctx )[1:9],
-      nrow = reoTemplate@dimension )
-    Y[looper,] = getAntsrTransformParameters(loctx)[1:6]
-    X[looper,,,,1] = as.array( rr[[1]] )
+    temp = iMath( imgListLocal[[whichSample]], "Normalize" )
+    rr = randomAffineImage( temp, "Rigid", sdAffine=locaff, seeder = myseed )
+    loctx = rr[[2]]
+    loctxi = invertAntsrTransform( loctx )
+    Y[looper,] = getAntsrTransformParameters(loctxi)[1:6]
+    transformed = applyAntsrTransformToImage( loctx, temp, reoTemplate  )
+    X[looper,,,,1] = as.array( transformed )
+    rotmat = matrix( getAntsrTransformParameters( loctxi )[1:9], nrow = 3 )
     matlist[[looper]] = rotmat
-    if ( exists( "fittx" ) ) fitlist[[looper]] = fittx
     }
   return( list(
     X,   # the images
-    Y,
-    matlist,
-    fitlist
+    Y, matlist
   ) ) # input
 }
 
 ########################
 # Parameters --------------------------------------------------------------
 K <- keras::backend()
+ggte = generateData( batch_size=8, mySdAff = 5, isTest=TRUE  )
 
 tfRotVectorToMatrix <- function( x ) {
   # generate predicted rotation matrices
@@ -226,7 +149,6 @@ SO3_6_param_loss <- function( x, xpred ) {
 
 testingError <- function( mySdAff ) {
   with(tf$device("/cpu:0"), {
-    ggte = generateData( batch_size=8, mySdAff = mySdAff, isTest=TRUE  )
     predRot <- predict( orinet, tf$cast( ggte[[1]], mytype), batch_size = 4 )
   })
   # assess the matrix distances
@@ -241,43 +163,6 @@ testingError <- function( mySdAff ) {
   }
 
 
-#
-
-
-#
-if ( FALSE )
-  orinetOld =  createResNetModel3D(
-       list(NULL,NULL,NULL,1),
-       inputScalarsSize = 0,
-       numberOfClassificationLabels = 6,
-#       layers = 1:4,
-#       residualBlockSchedule = c(3, 4, 6, 3),
-       lowestResolution = 8,
-       cardinality = 2,
-       squeezeAndExcite = TRUE,
-       mode = "regression")
-
-
-filters=32
-inputLayer <- layer_input( list(NULL,NULL,NULL,1) )
-conv3d_block <- function( input, filters,
-      strides = 1, leakParameter = 0.2 ) {
-      d = layer_conv_3d( input, filters, kernel_size=9,
-        strides = strides, padding='same' )
-      d <- layer_batch_normalization( d )
-      d <- layer_activation_leaky_relu( d, leakParameter )
-      d
-    }
-x = conv3d_block( inputLayer, filters )
-x = layer_max_pooling_3d( x )
-x = conv3d_block( x, filters)
-x <- layer_batch_normalization( x )
-x = layer_max_pooling_3d( x )
-x = conv3d_block( x, filters )
-x <- layer_batch_normalization( x )
-x = layer_global_average_pooling_3d(x)
-x = layer_dense(x, 6, activation='linear')
-orinet = keras_model(inputs=inputLayer, outputs=x)
 
 orinet = createResNetModel3D(
       list(NULL,NULL,NULL,1),
@@ -298,20 +183,20 @@ for ( locsdct in length(locsds):length(locsds) ) {
   if ( locsd >= 0.5 ) num_epochs = 100
   if ( locsd >= 1.0 ) num_epochs = 40000
   mygpu=Sys.getenv("CUDA_VISIBLE_DEVICES")
-  opre = paste0("models/mouse_rotation_3D_GPU_blizzard",mygpu,"locsd",locsd)
+  opre = paste0("models/mouse_rotation_3D_GPU_update",mygpu,"locsd",locsd)
   mdlfn = paste0(opre,'.h5')
   mdlfnr = paste0(opre,'_recent.h5')
   lossperfn = paste0(opre,'_training_history.csv')
   if ( file.exists( mdlfn ) )
     load_model_weights_hdf5( orinet,  mdlfn )
   # Training loop -----------------------------------------------------------
-  optimizerE <- tf$keras$optimizers$Adam(1e-6)
+  optimizerE <- tf$keras$optimizers$Adam(1e-7)
   lossper = data.frame( loss=NA, rotval=NA, mseval=NA, SD=NA, testErr=NA,
     runningmean=NA )
   epoch=1
   if ( file.exists( lossperfn ) ) {
-  #  lossper = read.csv( lossperfn )
-  #  epoch = nrow( lossper ) + 1
+    lossper = read.csv( lossperfn )
+    epoch = nrow( lossper ) + 1
     }
   for (epoch in epoch:num_epochs ) {
   #  if ( epoch == 525 ) optimizerE <- tf$keras$optimizers$Adam(1e-3)
