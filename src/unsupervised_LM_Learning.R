@@ -43,16 +43,18 @@ reoTemplate
 locdim = dim(reoTemplate)
 lowerTrunc=1e-6
 upperTrunc=0.98
-inferenceInds = c( 1:2 )
+inferenceInds = c( 1:2, 4 )
 numToTest = sum( !demog$isTrain )
 if ( ! exists( "imgList" ) ) {
   imgList = list()
+  mskList = list()
   mynums = which( demog$isTrain )
   ct = 1
   for ( k in mynums ) {
     img = antsImageRead( paste0(  demog$fns[k] ) )
     reg = antsRegistration( reoTemplate, img, "Affine"  )
     imgList[[ct]] = reg$warpedmovout
+    mskList[[ct]] = getMask( reg$warpedmovout )
     ct = ct + 1
     }
   }
@@ -60,11 +62,13 @@ if ( ! exists( "imgList" ) ) {
 if ( ! exists( "imgListTest" ) ) {
   mynums = which( !demog$isTrain )
   imgListTest = list()
+  mskListTest = list()
   ct = 1
   for ( k in mynums ) {
     img = antsImageRead( paste0(  demog$fns[k] ) )
     reg = antsRegistration( reoTemplate, img, "Affine" )
-    imgListTest[[ct]] = reg$warpedmovout
+    imgListTest[[ct]] = ( reg$warpedmovout )
+    mskListTest[[ct]] = getMask( reg$warpedmovout )
     ct = ct + 1
     }
   }
@@ -85,11 +89,14 @@ lossperfn = paste0(opre,'_training_history.csv')
 generateData <- function( batch_size = 32, mySdAff=0.15, isTest=FALSE, verbose=FALSE ) {
   if ( isTest ) {
     imgListLocal=imgListTest
+    maskListLocal=mskListTest
   } else {
     imgListLocal=imgList
+    maskListLocal=mskList
   }
   nBlob = nChannelsOut
   X = array( dim = c( batch_size, locdim, nChannelsIn ) )
+  Xmask = array( dim = c( batch_size, locdim, 1 ) )
   CC = array( dim = c( batch_size, locdim, length(locdim) ) )
   ntxparams = reoTemplate@dimension*reoTemplate@dimension # rotation matrix
   Xtx = array( 0, dim = c( batch_size, reoTemplate@dimension, reoTemplate@dimension ) )
@@ -106,9 +113,12 @@ generateData <- function( batch_size = 32, mySdAff=0.15, isTest=FALSE, verbose=F
       Xtx[looper,,] = matrix(getAntsrTransformParameters(loctxi)[1:ntxparams],nrow=reoTemplate@dimension)
       tempimg = applyAntsrTransformToImage( loctx, temp, reoTemplate  )
       X[looper,,,,1] = as.array( tempimg )
+      tempimg = applyAntsrTransformToImage( loctx, maskListLocal[[whichSample]], reoTemplate, interpolation = 'nearestNeighbor'  )
+      Xmask[looper,,,,1] = as.array( tempimg )
       coords = coordinateImages( tempimg * 0 + 1 )
     } else {
       X[looper,,,,1] = as.array( temp )
+      Xmask[looper,,,,1] = as.array(  maskListLocal[[whichSample]] )
       coords = coordinateImages( temp * 0 + 1 )
     }
     for ( jj in 1:reoTemplate@dimension) {
@@ -119,7 +129,8 @@ generateData <- function( batch_size = 32, mySdAff=0.15, isTest=FALSE, verbose=F
   return( list(
     X,   # the images
     CC,  # coord conv
-    Xtx # the transforms
+    Xtx, # the transforms,
+    Xmask
   ) ) # input
 }
 ########################
@@ -143,7 +154,7 @@ unetLM = createUnetModel3D(
        additionalOptions = "nnUnetActivationStyle",
        mode = c("sigmoid")
      )
-findpoints = deepLandmarkRegressionWithHeatmaps( unetLM, activation='none', theta=NA, useMask=FALSE )
+findpoints = deepLandmarkRegressionWithHeatmaps( unetLM, activation='none', theta=NA, useMask=TRUE )
 
 if ( file.exists( mdlfn ) ) {
   print("Load from prior training history of this model")
@@ -157,12 +168,14 @@ testingError <- function( verbose = FALSE ) {
       datalist1 = list(
         tf$cast( array( ggte[[1]][k,,,,], dim=c(1,locdim,1)) ,mytype), # images
         tf$cast( array( ggte[[2]][k,,,,], dim=c(1,locdim,3) ),mytype), # coord conv
-        tf$cast( array( ggte[[3]][k,,], dim=c(1,3,3) ),mytype) # transform parameters,
+        tf$cast( array( ggte[[3]][k,,], dim=c(1,3,3) ),mytype), # transform parameters,
+        tf$cast( array( ggte[[4]][k,,,,], dim=c(1,locdim,1)) ,mytype) # images
       )
       datalist2 = list(
         tf$cast( array( ggte[[1]][k+1,,,,], dim=c(1,locdim,1)) ,mytype), # images
         tf$cast( array( ggte[[2]][k+1,,,,], dim=c(1,locdim,3) ),mytype), # coord conv
-        tf$cast( array( ggte[[3]][k+1,,], dim=c(1,3,3) ),mytype) # transform parameters,
+        tf$cast( array( ggte[[3]][k+1,,], dim=c(1,3,3) ),mytype), # transform parameters,
+        tf$cast( array( ggte[[4]][k+1,,,,], dim=c(1,locdim,1)) ,mytype) # images
       )
       pointsout1 <- findpoints( datalist1[ inferenceInds ] )
       pointsout2 <- findpoints( datalist2[ inferenceInds ] )
@@ -258,7 +271,7 @@ if ( file.exists( lossperfn ) ) {
   lossper = read.csv( lossperfn )
   epoch = nrow( lossper ) + 1
   }
-optimizerEHi <- tf$keras$optimizers$Adam(1e-2)
+optimizerEHi <- tf$keras$optimizers$Adam(1e-4)
 optimizerEMid <- tf$keras$optimizers$Adam(5e-3)
 optimizerELo <- tf$keras$optimizers$Adam(5e-4)
 optimizerE = optimizerEMid
@@ -285,12 +298,14 @@ for ( epoch in epoch:num_epochs ) {
     datalist1 = list(
       tf$cast( array( gg[[1]][1,,,,], dim=c(1,locdim,1)) ,mytype), # images
       tf$cast( array( gg[[2]][1,,,,], dim=c(1,locdim,3) ),mytype), # coord conv
-      tf$cast( array( gg[[3]][1,,], dim=c(1,3,3) ),mytype) # transform parameters,
+      tf$cast( array( gg[[3]][1,,], dim=c(1,3,3) ),mytype), # transform parameters,
+      tf$cast( array( gg[[4]][1,,,,], dim=c(1,locdim,1)) ,mytype) # mask
     )
     datalist2 = list(
       tf$cast( array( gg[[1]][2,,,,], dim=c(1,locdim,1)) ,mytype), # images
       tf$cast( array( gg[[2]][2,,,,], dim=c(1,locdim,3) ),mytype), # coord conv
-      tf$cast( array( gg[[3]][2,,], dim=c(1,3,3) ),mytype) # transform parameters,
+      tf$cast( array( gg[[3]][2,,], dim=c(1,3,3) ),mytype), # transform parameters,
+      tf$cast( array( gg[[4]][2,,,,], dim=c(1,locdim,1)) ,mytype) # mask
     )
   })
 
@@ -354,7 +369,7 @@ for ( epoch in epoch:num_epochs ) {
   print( tail( lossper, 1 ) )
   }
 
-x=c(1,53)
+x=c(14,27)
 im1 = as.antsImage( gg[[1]][1,,,,1] ) %>% antsCopyImageInfo2( reoTemplate )
 im2 = as.antsImage( gg[[1]][2,,,,1] ) %>% antsCopyImageInfo2( reoTemplate )
 antsImageWrite( im1, '/tmp/temp0.nii.gz')
